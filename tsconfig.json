@@ -1,0 +1,17 @@
+// tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS", // Standard for Node.js/Express
+    "outDir": "./dist", // Output directory for compiled JS
+    "rootDir": "./src", // Source directory
+    "strict": true, // Enable all strict type-checking options
+    "esModuleInterop": true, // Allows default imports from commonjs modules
+    "skipLibCheck": true, // Skip type checking of declaration files
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true, // Allow importing JSON files
+    "moduleResolution": "node"
+  },
+  "include": ["src/**/*"], // Which files to compile
+  "exclude": ["node_modules", "**/*.spec.ts"] // Which files to exclude
+}

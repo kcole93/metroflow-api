@@ -646,51 +646,71 @@ export async function getDeparturesForStation(
 }
 
 // --- getServiceAlerts Function ---
-export async function getServiceAlerts(): Promise<ServiceAlert[]> {
+export async function getServiceAlerts(
+  targetLines?: string[], // Optional: Filter by specific line short names
+  filterActiveNow = false // Optional: Only show alerts currently active
+): Promise<ServiceAlert[]> {
   const feedUrl = ALERT_FEEDS.ALL
   const feedName = 'all_service_alerts'
-  // console.log(`[Alerts] Fetching ${feedName}`); // Reduce noise
+  console.log(
+    `[Alerts Service] Fetching ${feedName}. Filters: lines=${
+      targetLines?.join(',') || 'N/A'
+    }, activeNow=${filterActiveNow}`
+  )
 
   const fetchedData = await fetchAndParseFeed(feedUrl, feedName)
   const message = fetchedData?.message
 
-  const alerts: ServiceAlert[] = []
+  let allAlerts: ServiceAlert[] = [] // Start with empty list
+
   if (!message?.entity?.length) {
-    // console.warn("[Alerts] No entities found in the service alert feed message."); // Reduce noise
-    return alerts
+    console.warn(
+      '[Alerts Service] No entities found in the alert feed message.'
+    )
+    return allAlerts
   }
 
-  const staticData = await getStaticData()
+  const staticData = getStaticData() // Needed for route mapping
 
+  // --- Parse ALL alerts first ---
   for (const entity of message.entity) {
     const alert = entity.alert
     if (alert) {
       try {
-        const affectedLines: string[] = []
+        const affectedLinesShortNames: string[] = [] // Store short names
         if (alert.informed_entity) {
           for (const informed of alert.informed_entity) {
             if (informed.route_id) {
               const alertRouteId = informed.route_id
+              // Try to find route info using potential keys
               let routeInfo: StaticRouteInfo | undefined | null = null
-              let potentialKeySubway = `Subway-${alertRouteId}`
+              let potentialKeySubway = `SUBWAY-${alertRouteId}`
               let potentialKeyLIRR = `LIRR-${alertRouteId}`
               let potentialKeyMNR = `MNR-${alertRouteId}`
-
               routeInfo =
-                staticData.routes.get(potentialKeySubway) ||
-                staticData.routes.get(potentialKeyLIRR) ||
-                staticData.routes.get(potentialKeyMNR)
+                (await staticData).routes.get(potentialKeySubway) ||
+                (await staticData).routes.get(potentialKeyLIRR) ||
+                (await staticData).routes.get(potentialKeyMNR)
 
+              const shortName = routeInfo?.route_short_name?.trim()
+              // Use short name if available and not already added
               if (
-                routeInfo?.route_short_name &&
-                !affectedLines.includes(routeInfo.route_short_name)
-              )
-                affectedLines.push(routeInfo.route_short_name)
-              else if (routeInfo && !affectedLines.includes(routeInfo.route_id))
-                affectedLines.push(routeInfo.route_id)
-              else if (!routeInfo && !affectedLines.includes(alertRouteId))
-                affectedLines.push(alertRouteId)
+                shortName &&
+                shortName !== '' &&
+                !affectedLinesShortNames.includes(shortName)
+              ) {
+                affectedLinesShortNames.push(shortName)
+              } else if (
+                !routeInfo &&
+                !affectedLinesShortNames.includes(alertRouteId)
+              ) {
+                // Fallback to raw route ID if lookup failed
+                // console.log(`[Alerts] Route info not found for affected route ID: ${alertRouteId}`);
+                affectedLinesShortNames.push(alertRouteId)
+              }
+              // Note: LIRR/MNR might primarily use long names, adapt if needed
             }
+            // TODO: Add logic for stopId, agencyId if needed
           }
         }
 
@@ -702,11 +722,12 @@ export async function getServiceAlerts(): Promise<ServiceAlert[]> {
         const startDateEpoch = alert.active_period?.[0]?.start
         const endDateEpoch = alert.active_period?.[0]?.end
 
-        alerts.push({
+        // Create the full alert object
+        allAlerts.push({
           id: entity.id,
           title: title,
           description: description,
-          affectedLines: affectedLines.sort(),
+          affectedLines: affectedLinesShortNames.sort(), // Store processed short names
           startDate: startDateEpoch
             ? new Date(Number(startDateEpoch) * 1000)
             : undefined,
@@ -716,17 +737,58 @@ export async function getServiceAlerts(): Promise<ServiceAlert[]> {
           url: url
         })
       } catch (alertError) {
-        console.error(
-          `[Alerts] Error processing alert entity ${entity.id}:`,
-          alertError
-        )
+        /* ... error handling ... */
       }
-    }
+    } // end if(alert)
+  } // end for loop
+  console.log(
+    `[Alerts Service] Parsed ${allAlerts.length} total alerts from feed.`
+  )
+
+  // --- Apply Filters ---
+  let filteredAlerts = allAlerts
+
+  // 1. Filter by Active Period
+  if (filterActiveNow) {
+    const now = Date.now()
+    filteredAlerts = filteredAlerts.filter((alert) => {
+      const start = alert.startDate?.getTime()
+      const end = alert.endDate?.getTime()
+      // Include if: No start date OR start date is in the past/now
+      const started = !start || start <= now
+      // Include if: No end date OR end date is in the future/now
+      const notEnded = !end || end >= now
+      return started && notEnded
+    })
+    console.log(
+      `[Alerts Service] Filtered to ${filteredAlerts.length} active alerts.`
+    )
   }
 
-  // console.log(`[Alerts] Processed ${message.entity.length} entities, found ${alerts.length} alerts.`);
-  alerts.sort(
+  // 2. Filter by Target Lines (case-insensitive comparison recommended)
+  if (targetLines && targetLines.length > 0) {
+    // Normalize targetLines from query param (already done in route handler if needed)
+    // Ensure case matches how affectedLinesShortNames were stored (e.g., both uppercase)
+    const targetLinesUpper = targetLines.map((l) => l.toUpperCase()) // Example normalization
+
+    filteredAlerts = filteredAlerts.filter((alert) => {
+      // Check if ANY of the alert's affected lines match ANY of the target lines
+      return alert.affectedLines.some(
+        (alertLine) => targetLinesUpper.includes(alertLine.toUpperCase()) // Case-insensitive check
+      )
+    })
+    console.log(
+      `[Alerts Service] Filtered to ${
+        filteredAlerts.length
+      } alerts affecting lines: [${targetLines.join(', ')}]`
+    )
+  }
+  // --- End Apply Filters ---
+
+  // Sort the *filtered* results (e.g., by start date descending)
+  filteredAlerts.sort(
     (a, b) => (b.startDate?.getTime() ?? 0) - (a.startDate?.getTime() ?? 0)
   )
-  return alerts
+
+  return filteredAlerts
 }

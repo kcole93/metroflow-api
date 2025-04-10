@@ -14,6 +14,7 @@ export interface Station {
 
 export type Direction = "N" | "S" | "E" | "W" | "Unknown";
 export type SystemType = "LIRR" | "SUBWAY" | "MNR" | "MIXED" | "UNKNOWN";
+export type PeakStatus = "Peak" | "Off-Peak";
 
 export interface StaticStopTimeInfo {
   scheduledDepartureTime?: string | null; // Store as HH:MM:SS string
@@ -56,6 +57,8 @@ export interface Departure {
   routeId?: string; // From trips.txt -> routes.txt
   routeShortName?: string; // e.g., "4", "Port Washington" from routes.txt
   routeLongName?: string; // e.g. "Lexington Avenue Express" from routes.txt
+  peakStatus?: PeakStatus | null;
+  routeColor?: string | null;
   destination: string; // Often derived from trip headsign or stop sequence
   direction?: Direction | null;
   direction_id?: number | null; // 0 or 1, for LIRR/MNR only
@@ -146,6 +149,7 @@ export interface StaticTripInfo {
   trip_id: string;
   trip_headsign?: string; // Usually the destination shown on the train
   trip_short_name?: string;
+  peak_offpeak?: string | null;
   direction_id?: number | null; // 0 or 1, often indicates direction (e.g., Uptown/Downtown)
   block_id?: string;
   shape_id?: string; // Links to shapes.txt for drawing route path

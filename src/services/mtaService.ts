@@ -12,6 +12,7 @@ import {
   Direction,
   SystemType,
   StaticData,
+  PeakStatus,
 } from "../types";
 import * as dotenv from "dotenv";
 
@@ -264,6 +265,21 @@ export async function getStations(
   stations.sort((a, b) => a.name.localeCompare(b.name));
   return stations;
 }
+
+// --- Helper function to map peak_offpeak value ---
+function getPeakStatus(
+  peakOffpeakValue: string | null | undefined,
+): PeakStatus | null {
+  if (peakOffpeakValue === "1") {
+    // Assuming '1' means Peak (VERIFY THIS!)
+    return "Peak";
+  } else if (peakOffpeakValue === "0") {
+    // Assuming '0' means Off-Peak
+    return "Off-Peak";
+  }
+  return null; // Return null if missing or other value
+}
+// ---
 
 // --- getDeparturesForStation Function (UPDATED with Static Fallback) ---
 export async function getDeparturesForStation(
@@ -621,13 +637,19 @@ export async function getDeparturesForStation(
                 }
                 // --- End Status ---
 
+                // --- Determine Peak Status using tripInfo ---
+                const peakStatus = getPeakStatus(tripInfo?.peak_offpeak);
+                // ---
+
                 // --- Create Departure Object ---
                 const departure: Departure = {
                   id: `${tripIdFromFeed}-${stu.stop_id}-${relevantTime}`,
                   tripId: tripIdFromFeed,
                   routeId: actualRouteId,
-                  routeShortName: routeInfo?.route_short_name || "?",
-                  routeLongName: routeInfo?.route_long_name || "?",
+                  routeShortName: routeInfo?.route_short_name || "",
+                  routeLongName: routeInfo?.route_long_name || "",
+                  peakStatus: peakStatus,
+                  routeColor: routeInfo?.route_color || null,
                   destination: finalDestination,
                   departureTime: relevantTime ? new Date(relevantTime) : null,
                   delayMinutes: delayMinutes,
@@ -779,12 +801,18 @@ export async function getDeparturesForStation(
 
             let track = stopTimeInfo.track || undefined; // Use track from static stop_times
 
+            // --- Determine Peak Status using tripInfo ---
+            const peakStatus = getPeakStatus(tripInfo?.peak_offpeak);
+            // ---
+
             const departure: Departure = {
               id: staticTripId,
               tripId: staticTripId, // Use static ID
               routeId: actualRouteId,
-              routeShortName: routeInfo?.route_short_name || "?",
-              routeLongName: routeInfo?.route_long_name || "?",
+              routeShortName: routeInfo?.route_short_name || "",
+              routeLongName: routeInfo?.route_long_name || "",
+              peakStatus: peakStatus,
+              routeColor: routeInfo?.route_color || null,
               destination: finalDestination,
               departureTime: scheduledTime, // Use SCHEDULED Date object
               delayMinutes: null, // No delay info
@@ -856,65 +884,65 @@ export async function getDeparturesForStation(
 // --- getServiceAlerts Function ---
 export async function getServiceAlerts(
   targetLines?: string[], // Optional: Filter by specific line short names
-  filterActiveNow = false // Optional: Only show alerts currently active
+  filterActiveNow = false, // Optional: Only show alerts currently active
 ): Promise<ServiceAlert[]> {
-  const feedUrl = ALERT_FEEDS.ALL
-  const feedName = 'all_service_alerts'
+  const feedUrl = ALERT_FEEDS.ALL;
+  const feedName = "all_service_alerts";
   console.log(
     `[Alerts Service] Fetching ${feedName}. Filters: lines=${
-      targetLines?.join(',') || 'N/A'
-    }, activeNow=${filterActiveNow}`
-  )
+      targetLines?.join(",") || "N/A"
+    }, activeNow=${filterActiveNow}`,
+  );
 
-  const fetchedData = await fetchAndParseFeed(feedUrl, feedName)
-  const message = fetchedData?.message
+  const fetchedData = await fetchAndParseFeed(feedUrl, feedName);
+  const message = fetchedData?.message;
 
-  let allAlerts: ServiceAlert[] = [] // Start with empty list
+  let allAlerts: ServiceAlert[] = []; // Start with empty list
 
   if (!message?.entity?.length) {
     console.warn(
-      '[Alerts Service] No entities found in the alert feed message.'
-    )
-    return allAlerts
+      "[Alerts Service] No entities found in the alert feed message.",
+    );
+    return allAlerts;
   }
 
-  const staticData = getStaticData() // Needed for route mapping
+  const staticData = getStaticData(); // Needed for route mapping
 
   // --- Parse ALL alerts first ---
   for (const entity of message.entity) {
-    const alert = entity.alert
+    const alert = entity.alert;
     if (alert) {
       try {
-        const affectedLinesShortNames: string[] = [] // Store short names
+        const affectedLinesShortNames: string[] = []; // Store short names
         if (alert.informed_entity) {
           for (const informed of alert.informed_entity) {
             if (informed.route_id) {
-              const alertRouteId = informed.route_id
+              const alertRouteId = informed.route_id;
               // Try to find route info using potential keys
-              let routeInfo: StaticRouteInfo | undefined | null = null
-              let potentialKeySubway = `SUBWAY-${alertRouteId}`
-              let potentialKeyLIRR = `LIRR-${alertRouteId}`
-              let potentialKeyMNR = `MNR-${alertRouteId}`
+              let routeInfo: StaticRouteInfo | undefined | null = null;
+              let potentialKeySubway = `SUBWAY-${alertRouteId}`;
+              let potentialKeyLIRR = `LIRR-${alertRouteId}`;
+              let potentialKeyMNR = `MNR-${alertRouteId}`;
               routeInfo =
                 (await staticData).routes.get(potentialKeySubway) ||
                 (await staticData).routes.get(potentialKeyLIRR) ||
-                (await staticData).routes.get(potentialKeyMNR)
+                (await staticData).routes.get(potentialKeyMNR);
 
-              const shortName = routeInfo?.route_short_name?.trim()
+              const shortName = routeInfo?.route_short_name?.trim();
               // Use short name if available and not already added
               if (
                 shortName &&
-                shortName !== '' &&
+                shortName !== "" &&
                 !affectedLinesShortNames.includes(shortName)
               ) {
-                affectedLinesShortNames.push(shortName)
+                affectedLinesShortNames.push(shortName);
               } else if (
                 !routeInfo &&
                 !affectedLinesShortNames.includes(alertRouteId)
               ) {
                 // Fallback to raw route ID if lookup failed
                 // console.log(`[Alerts] Route info not found for affected route ID: ${alertRouteId}`);
-                affectedLinesShortNames.push(alertRouteId)
+                affectedLinesShortNames.push(alertRouteId);
               }
               // Note: LIRR/MNR might primarily use long names, adapt if needed
             }
@@ -923,12 +951,13 @@ export async function getServiceAlerts(
         }
 
         const getText = (field: any): string | undefined =>
-          field?.translation?.[0]?.text
-        const title = getText(alert.header_text) || 'Untitled Alert'
-        const description = getText(alert.description_text) || 'No description.'
-        const url = getText(alert.url)
-        const startDateEpoch = alert.active_period?.[0]?.start
-        const endDateEpoch = alert.active_period?.[0]?.end
+          field?.translation?.[0]?.text;
+        const title = getText(alert.header_text) || "Untitled Alert";
+        const description =
+          getText(alert.description_text) || "No description.";
+        const url = getText(alert.url);
+        const startDateEpoch = alert.active_period?.[0]?.start;
+        const endDateEpoch = alert.active_period?.[0]?.end;
 
         // Create the full alert object
         allAlerts.push({
@@ -942,61 +971,61 @@ export async function getServiceAlerts(
           endDate: endDateEpoch
             ? new Date(Number(endDateEpoch) * 1000)
             : undefined,
-          url: url
-        })
+          url: url,
+        });
       } catch (alertError) {
         /* ... error handling ... */
       }
     } // end if(alert)
   } // end for loop
   console.log(
-    `[Alerts Service] Parsed ${allAlerts.length} total alerts from feed.`
-  )
+    `[Alerts Service] Parsed ${allAlerts.length} total alerts from feed.`,
+  );
 
   // --- Apply Filters ---
-  let filteredAlerts = allAlerts
+  let filteredAlerts = allAlerts;
 
   // 1. Filter by Active Period
   if (filterActiveNow) {
-    const now = Date.now()
+    const now = Date.now();
     filteredAlerts = filteredAlerts.filter((alert) => {
-      const start = alert.startDate?.getTime()
-      const end = alert.endDate?.getTime()
+      const start = alert.startDate?.getTime();
+      const end = alert.endDate?.getTime();
       // Include if: No start date OR start date is in the past/now
-      const started = !start || start <= now
+      const started = !start || start <= now;
       // Include if: No end date OR end date is in the future/now
-      const notEnded = !end || end >= now
-      return started && notEnded
-    })
+      const notEnded = !end || end >= now;
+      return started && notEnded;
+    });
     console.log(
-      `[Alerts Service] Filtered to ${filteredAlerts.length} active alerts.`
-    )
+      `[Alerts Service] Filtered to ${filteredAlerts.length} active alerts.`,
+    );
   }
 
   // 2. Filter by Target Lines (case-insensitive comparison recommended)
   if (targetLines && targetLines.length > 0) {
     // Normalize targetLines from query param (already done in route handler if needed)
     // Ensure case matches how affectedLinesShortNames were stored (e.g., both uppercase)
-    const targetLinesUpper = targetLines.map((l) => l.toUpperCase()) // Example normalization
+    const targetLinesUpper = targetLines.map((l) => l.toUpperCase()); // Example normalization
 
     filteredAlerts = filteredAlerts.filter((alert) => {
       // Check if ANY of the alert's affected lines match ANY of the target lines
       return alert.affectedLines.some(
-        (alertLine) => targetLinesUpper.includes(alertLine.toUpperCase()) // Case-insensitive check
-      )
-    })
+        (alertLine) => targetLinesUpper.includes(alertLine.toUpperCase()), // Case-insensitive check
+      );
+    });
     console.log(
       `[Alerts Service] Filtered to ${
         filteredAlerts.length
-      } alerts affecting lines: [${targetLines.join(', ')}]`
-    )
+      } alerts affecting lines: [${targetLines.join(", ")}]`,
+    );
   }
   // --- End Apply Filters ---
 
   // Sort the *filtered* results (e.g., by start date descending)
   filteredAlerts.sort(
-    (a, b) => (b.startDate?.getTime() ?? 0) - (a.startDate?.getTime() ?? 0)
-  )
+    (a, b) => (b.startDate?.getTime() ?? 0) - (a.startDate?.getTime() ?? 0),
+  );
 
-  return filteredAlerts
+  return filteredAlerts;
 }

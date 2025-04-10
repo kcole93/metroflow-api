@@ -121,7 +121,7 @@ export async function loadStaticData(): Promise<StaticData> {
         route_long_name: r.route_long_name?.trim() || "",
         route_type: r.route_type ? parseInt(r.route_type, 10) : undefined,
         route_color: r.route_color,
-        route_text_color: r.route_text_color,
+        route_text_color: r.route_text_color?.trim() || null,
         system: system, // Assign system
       });
     };
@@ -181,6 +181,7 @@ export async function loadStaticData(): Promise<StaticData> {
         service_id: t.service_id?.trim() || "",
         trip_headsign: t.trip_headsign?.trim() || undefined,
         trip_short_name: t.trip_short_name?.trim() || undefined,
+        peak_offpeak: t.peak_offpeak?.trim() || null,
         direction_id: directionIdNum,
         block_id: t.block_id?.trim() || undefined,
         shape_id: t.shape_id?.trim() || undefined,

@@ -1,154 +1,89 @@
 // src/services/staticDataService.ts
-import * as fs from 'fs/promises'
-import * as path from 'path'
-import Papa from 'papaparse'
+import * as fs from "fs/promises";
+import * as path from "path";
+import Papa from "papaparse";
 import {
   StaticData,
   StaticStopInfo,
   StaticRouteInfo,
-  StaticTripInfo
-  // Assuming types like normalizeSystemType, toGtfsSystemType, etc. are defined if used
-  // Or remove them if not necessary for the core logic now
-} from '../types'
-import * as dotenv from 'dotenv'
-// We still need this map for the final step of linking feeds
-import {
-  SUBWAY_FEEDS,
-  LIRR_FEED,
-  MNR_FEED,
-  ROUTE_ID_TO_FEED_MAP
-} from '../services/mtaService'
+  StaticTripInfo,
+  StaticStopTimeInfo, // Make sure this is defined in types.ts
+  SystemType, // Make sure this is defined in types.ts ('LIRR' | 'SUBWAY' | 'MNR' ...)
+} from "../types";
+import * as dotenv from "dotenv";
+import { getBoroughForCoordinates } from "./geoService";
+// ROUTE_ID_TO_FEED_MAP is needed here to link feeds
+import { ROUTE_ID_TO_FEED_MAP } from "../services/mtaService";
 
-dotenv.config()
+dotenv.config();
 
-let staticData: StaticData | null = null
+let staticData: StaticData | null = null;
 const BASE_DATA_PATH =
-  process.env.STATIC_DATA_PATH || './src/assets/gtfs-static'
+  process.env.STATIC_DATA_PATH || "./src/assets/gtfs-static";
 
-// Base interface for raw stop time data
+// Base interface for raw stop time data from CSV
 interface StopTimeBase {
-  trip_id: string
-  arrival_time?: string // Optional in GTFS spec, though often present
-  departure_time?: string // Optional in GTFS spec, though often present
-  stop_id: string
-  stop_sequence: string
-  // Add other optional fields if they exist in your files
-  // pickup_type?: string;
-  // drop_off_type?: string;
+  trip_id: string;
+  arrival_time?: string;
+  departure_time?: string;
+  stop_id: string;
+  stop_sequence: string;
+  track?: string; // Include track if present
+  // Add other optional fields if they exist (pickup_type, drop_off_type)
 }
 
+// CSV Parser Function
 async function parseCsvFile<T extends object>(filePath: string): Promise<T[]> {
   try {
-    const fileContent = await fs.readFile(filePath, 'utf8')
+    // console.log(`Reading static file: ${filePath}`);
+    const fileContent = await fs.readFile(filePath, "utf8");
     const result = Papa.parse<T>(fileContent, {
       header: true,
       skipEmptyLines: true,
-      dynamicTyping: false // KEEP false
-    })
+      dynamicTyping: false, // Keep false for manual type handling
+    });
     if (result.errors.length > 0) {
       console.warn(
         `Parsing errors in ${path.basename(filePath)}:`,
-        result.errors.slice(0, 5)
-      )
+        result.errors.slice(0, 5),
+      );
     }
-    return result.data
+    return result.data;
   } catch (error) {
     console.error(
       `Error reading/parsing CSV ${path.basename(filePath)}:`,
-      error
-    )
-    throw error // Re-throw after logging
+      error,
+    );
+    throw error; // Re-throw
   }
 }
 
-// --- Ensure StaticData type only includes needed maps ---
-// (Remove tripsBySchedule for now unless you reimplement that logic)
-// export interface StaticData {
-//     stops: Map<string, StaticStopInfo>;
-//     routes: Map<string, StaticRouteInfo>; // Key: SYSTEM-ROUTEID
-//     trips: Map<string, StaticTripInfo>;   // Key: trip_id (raw from file)
-// }
-// ---
-
-// Utility function to build route-to-feed mapping
-async function buildRouteFeedMapping(
-  trips: StaticTripInfo[]
-): Promise<{ [key: string]: string }> {
-  const routeFeedMap: { [key: string]: string } = {}
-
-  // First, create a map of route IDs to their system type
-  const routeSystemMap = new Map<string, string>()
-  trips.forEach((trip) => {
-    if (trip.route_id && trip.system) {
-      routeSystemMap.set(trip.route_id, trip.system)
-    }
-  })
-
-  // Then create the mapping based on system type
-  routeSystemMap.forEach((system, routeId) => {
-    switch (system) {
-      case 'SUBWAY':
-        // For subway, we need to determine which feed based on the route
-        const routeLetter = routeId.replace('SUBWAY-', '').toUpperCase()
-        if ('ACE'.includes(routeLetter)) {
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.ACE
-        } else if ('BDFM'.includes(routeLetter)) {
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.BDFM
-        } else if (routeLetter === 'G') {
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.G
-        } else if ('JZ'.includes(routeLetter)) {
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.JZ
-        } else if ('NQRW'.includes(routeLetter)) {
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.NQRW
-        } else if (routeLetter === 'L') {
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.L
-        } else if (routeLetter === 'SI') {
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.SI
-        } else if (!isNaN(parseInt(routeLetter))) {
-          // Numeric routes
-          routeFeedMap[`SUBWAY-${routeLetter}`] = SUBWAY_FEEDS.NUMERIC
-        }
-        break
-      case 'LIRR':
-        // All LIRR routes use the same feed
-        routeFeedMap[`LIRR-${routeId.replace('LIRR-', '')}`] = LIRR_FEED
-        break
-      case 'MNR':
-        // All MNR routes use the same feed
-        routeFeedMap[`MNR-${routeId.replace('MNR-', '')}`] = MNR_FEED
-        break
-    }
-  })
-
-  return routeFeedMap
-}
-
+// --- Main Data Loading Function ---
 export async function loadStaticData(): Promise<StaticData> {
   if (staticData) {
-    return staticData
+    console.log("[Static Data] Returning cached static data.");
+    return staticData;
   }
 
-  // --- Define System Names and Paths Consistently (Use Title Case) ---
+  // Define system paths (ensure these match your directory structure and SystemType)
   const systems = [
-    { name: 'LIRR' as const, path: path.join(BASE_DATA_PATH, 'LIRR') },
-    { name: 'SUBWAY' as const, path: path.join(BASE_DATA_PATH, 'NYCT') },
-    { name: 'MNR' as const, path: path.join(BASE_DATA_PATH, 'MNR') }
-  ]
-  // ---
+    { name: "LIRR" as SystemType, path: path.join(BASE_DATA_PATH, "LIRR") },
+    { name: "SUBWAY" as SystemType, path: path.join(BASE_DATA_PATH, "NYCT") },
+    { name: "MNR" as SystemType, path: path.join(BASE_DATA_PATH, "MNR") },
+  ];
 
-  console.log(`Loading static GTFS data...`)
+  console.log(`[Static Data] Loading static GTFS data...`);
 
   try {
-    // --- Load All Files Concurrently ---
+    // --- 1. Load All Raw Files ---
+    console.log("[Static Data] Phase 1: Loading raw CSV files...");
     const promises = systems.flatMap((sys) => [
-      parseCsvFile<any>(path.join(sys.path, 'stops.txt')),
-      parseCsvFile<any>(path.join(sys.path, 'routes.txt')),
-      parseCsvFile<any>(path.join(sys.path, 'trips.txt')),
-      parseCsvFile<StopTimeBase>(path.join(sys.path, 'stop_times.txt'))
-    ])
-    const results = await Promise.all(promises)
-
-    // Deconstruct results based on the order in promises array
+      parseCsvFile<any>(path.join(sys.path, "stops.txt")),
+      parseCsvFile<any>(path.join(sys.path, "routes.txt")), // Expects route_id
+      parseCsvFile<any>(path.join(sys.path, "trips.txt")), // Expects trip_id, route_id, service_id, direction_id
+      parseCsvFile<StopTimeBase>(path.join(sys.path, "stop_times.txt")), // Expects trip_id, stop_id, stop_sequence, times, track?
+    ]);
+    const results = await Promise.all(promises);
     const [
       lirrStopsRaw,
       lirrRoutesRaw,
@@ -161,335 +96,320 @@ export async function loadStaticData(): Promise<StaticData> {
       mnrStopsRaw,
       mnrRoutesRaw,
       mnrTripsRaw,
-      mnrStopTimesRaw
-    ] = results
+      mnrStopTimesRaw,
+    ] = results;
+    const allStopTimesRaw = [
+      ...lirrStopTimesRaw,
+      ...subwayStopTimesRaw,
+      ...mnrStopTimesRaw,
+    ];
+    const allTripsRaw = [...lirrTripsRaw, ...subwayTripsRaw, ...mnrTripsRaw];
+    console.log("[Static Data] Phase 1 finished.");
     // --- End File Loading ---
 
-    // --- Build tempRoutes map using unique SYSTEM-ROUTEID key ---
-    console.log('Building tempRoutes map (Key: System-RouteID)...')
-    const tempRoutes = new Map<string, StaticRouteInfo>()
-    const addRouteToMap = (r: any, system: StaticStopInfo['system']) => {
-      const routeId = r.route_id?.trim()
-      if (!routeId) return
-      const uniqueKey = `${system}-${routeId}`
-      // Ensure route_short_name and route_long_name are included
+    // --- 2. Build tempRoutes Map (Key: SYSTEM-ROUTEID) ---
+    console.log("[Static Data] Phase 2: Building routes map...");
+    const tempRoutes = new Map<string, StaticRouteInfo>();
+    const addRouteToMap = (r: any, system: SystemType) => {
+      const routeId = r.route_id?.trim();
+      if (!routeId) return;
+      const uniqueKey = `${system}-${routeId}`;
       tempRoutes.set(uniqueKey, {
-        ...r,
-        route_id: routeId,
-        route_short_name: r.route_short_name?.trim() || '',
-        route_long_name: r.route_long_name?.trim() || '',
-        system: system
-      })
-    }
-    lirrRoutesRaw.forEach((r) => addRouteToMap(r, 'LIRR'))
-    subwayRoutesRaw.forEach((r) => addRouteToMap(r, 'SUBWAY')) // Use Title Case
-    mnrRoutesRaw.forEach((r) => addRouteToMap(r, 'MNR'))
-    console.log(`Finished building tempRoutes map. Size: ${tempRoutes.size}`)
-
-    // --- Build tempTrips map (Key: raw trip_id) ---
-    // Store the system on the trip object itself for later reference
-    console.log('Building tempTrips map (Key: trip_id)...')
-    const tempTrips = new Map<string, StaticTripInfo>()
-    const addTripToMap = (t: any, system: StaticStopInfo['system']) => {
-      const tripId = t.trip_id?.trim()
-      const routeId = t.route_id?.trim()
-      if (!tripId || !routeId) return // Need both IDs
-      // --- Parse direction_id ---
-      let directionIdNum: number | null = null
-      if (
-        t.direction_id !== undefined &&
-        t.direction_id !== null &&
-        t.direction_id !== ''
-      ) {
-        const parsed = parseInt(t.direction_id, 10)
-        if (!isNaN(parsed)) {
-          directionIdNum = parsed // Should be 0 or 1
-        } else {
-          console.warn(
-            `[Static Data] Invalid direction_id "${t.direction_id}" for trip ${tripId}`
-          )
-        }
-      }
-      // ---
-
-      // Find destinationStopId (needs tripDestinations map built first)
-      const destStopId = tripDestinations.get(tripId) || null
-      tempTrips.set(tripId, {
-        ...t,
-        trip_id: tripId,
-        route_id: routeId,
-        system: system, // Add system to trip info
-        destinationStopId: destStopId, // Add destination
-        direction_id: directionIdNum // Add direction
-      })
-    }
-    // Note: Destination pass needs to happen before this map is finalized if needed here
-
-    // --- Pass 1: Process stop_times to find trip destinations ---
-    // (This needs to run before finalizing tempTrips if destStopId is stored on trip)
+        route_id: routeId, // Store trimmed
+        agency_id: r.agency_id?.trim() || undefined, // Store agency if present
+        route_short_name: r.route_short_name?.trim() || "",
+        route_long_name: r.route_long_name?.trim() || "",
+        route_type: r.route_type ? parseInt(r.route_type, 10) : undefined,
+        route_color: r.route_color,
+        route_text_color: r.route_text_color,
+        system: system, // Assign system
+      });
+    };
+    lirrRoutesRaw.forEach((r) => addRouteToMap(r, "LIRR"));
+    subwayRoutesRaw.forEach((r) => addRouteToMap(r, "SUBWAY")); // Use UPPERCASE
+    mnrRoutesRaw.forEach((r) => addRouteToMap(r, "MNR"));
     console.log(
-      'Pass 1: Processing stop_times to determine trip destinations...'
-    )
-    const tripDestinations = new Map<string, string>()
-    const tripMaxSequence = new Map<string, number>()
+      `[Static Data] Phase 2 finished. Routes map size: ${tempRoutes.size}`,
+    );
+    // --- End tempRoutes ---
+
+    // --- 3. Process stop_times to find Trip Destinations (Key: raw trip_id) ---
+    console.log(
+      "Pass 3: Processing stop_times to determine trip destinations...",
+    );
+    const tripDestinations = new Map<string, string>(); // Map: trip_id -> last_stop_id
+    const tripMaxSequence = new Map<string, number>();
     const findDestinations = (stopTimes: StopTimeBase[]) => {
       for (const st of stopTimes) {
-        const tripId = st.trip_id?.trim() // Trim here too!
-        if (!tripId || st.stop_sequence == null) continue
-        const stopSequence = parseInt(st.stop_sequence, 10)
+        const tripId = st.trip_id?.trim();
+        if (!tripId || st.stop_sequence == null) continue;
+        const stopSequence = parseInt(st.stop_sequence, 10);
         if (!isNaN(stopSequence)) {
-          const currentMax = tripMaxSequence.get(tripId) ?? -1
+          const currentMax = tripMaxSequence.get(tripId) ?? -1;
           if (stopSequence > currentMax) {
-            tripMaxSequence.set(tripId, stopSequence)
-            tripDestinations.set(tripId, st.stop_id)
+            tripMaxSequence.set(tripId, stopSequence);
+            tripDestinations.set(tripId, st.stop_id?.trim() || ""); // Store trimmed stop_id
           }
         }
       }
-    }
-    findDestinations(lirrStopTimesRaw)
-    findDestinations(subwayStopTimesRaw)
-    findDestinations(mnrStopTimesRaw)
+    };
+    findDestinations(allStopTimesRaw);
     console.log(
-      `Pass 1 finished. Found destinations for ${tripDestinations.size} trips.`
-    )
+      `Pass 3 finished. Found destinations for ${tripDestinations.size} trips.`,
+    );
+    // --- End Destination Finding ---
 
-    // --- Finalize tempTrips map (includes system and destinationStopId) ---
-    console.log('Finalizing tempTrips map...')
-    lirrTripsRaw.forEach((t) => addTripToMap(t, 'LIRR'))
-    subwayTripsRaw.forEach((t) => addTripToMap(t, 'SUBWAY')) // Use Title Case
-    mnrTripsRaw.forEach((t) => addTripToMap(t, 'MNR'))
-    console.log(
-      `Finished building final tempTrips map. Size: ${tempTrips.size}`
-    )
-
-    // --- Pass 2: Build enrichedStops map ---
-    console.log(
-      'Pass 2: Processing raw stops into enriched map (Key: System-StopId)...'
-    )
-    const enrichedStops = new Map<string, StaticStopInfo>()
-    const processStop = (rawStop: any, system: StaticStopInfo['system']) => {
-      const originalStopId = rawStop.stop_id?.trim()
-      if (!originalStopId) return
-
-      const uniqueStopId = `${system}-${originalStopId}`
-
-      let locationTypeNum: number | null = null
-      const locStr = rawStop.location_type
-      if (typeof locStr === 'string' && locStr.trim() !== '') {
-        const p = parseInt(locStr, 10)
-        if (!isNaN(p)) locationTypeNum = p
+    // --- 4. Build FINAL tempTrips map (Key: raw trip_id) ---
+    console.log("Pass 4: Building final tempTrips map...");
+    const tempTrips = new Map<string, StaticTripInfo>();
+    const addTripToMap = (t: any, system: SystemType) => {
+      const tripId = t.trip_id?.trim();
+      const routeId = t.route_id?.trim();
+      if (!tripId || !routeId) return;
+      let directionIdNum: number | null = null;
+      const dirIdStr = t.direction_id;
+      if (dirIdStr != null && dirIdStr !== "") {
+        const p = parseInt(dirIdStr, 10);
+        if (!isNaN(p)) directionIdNum = p;
       }
-      const lat =
-        typeof rawStop.stop_lat === 'string'
+      const destStopId = tripDestinations.get(tripId) || null; // Lookup destination ID
+      tempTrips.set(tripId, {
+        // Use raw tripId as key
+        // Explicitly list fields from StaticTripInfo type
+        trip_id: tripId,
+        route_id: routeId,
+        service_id: t.service_id?.trim() || "",
+        trip_headsign: t.trip_headsign?.trim() || undefined,
+        trip_short_name: t.trip_short_name?.trim() || undefined,
+        direction_id: directionIdNum,
+        block_id: t.block_id?.trim() || undefined,
+        shape_id: t.shape_id?.trim() || undefined,
+        system: system, // Store system
+        destinationStopId: destStopId, // Store destination ID
+      });
+    };
+    lirrTripsRaw.forEach((t) => addTripToMap(t, "LIRR"));
+    subwayTripsRaw.forEach((t) => addTripToMap(t, "SUBWAY"));
+    mnrTripsRaw.forEach((t) => addTripToMap(t, "MNR"));
+    console.log(`Pass 4 finished. Final tempTrips map size: ${tempTrips.size}`);
+    // --- End Build tempTrips ---
+
+    // --- 5. Build enrichedStops map (Key: SYSTEM-STOPID) + Geofencing ---
+    console.log(
+      "Pass 5: Processing raw stops into enriched map + geofencing...",
+    );
+    const enrichedStops = new Map<string, StaticStopInfo>();
+    let stopsGeofencedCount = 0;
+    const processStop = (rawStop: any, system: SystemType) => {
+      const originalStopId = rawStop.stop_id?.trim();
+      if (!originalStopId) return;
+      const uniqueStopKey = `${system}-${originalStopId}`;
+      const latitude =
+        typeof rawStop.stop_lat === "string"
           ? parseFloat(rawStop.stop_lat)
-          : rawStop.stop_lat
-      const lon =
-        typeof rawStop.stop_lon === 'string'
+          : rawStop.stop_lat;
+      const longitude =
+        typeof rawStop.stop_lon === "string"
           ? parseFloat(rawStop.stop_lon)
-          : rawStop.stop_lon
-      const originalParentId = rawStop.parent_station?.trim() || null
-      const uniqueParentId = originalParentId
-        ? `${system}-${originalParentId}`
-        : null
-      if (!enrichedStops.has(uniqueStopId)) {
-        enrichedStops.set(uniqueStopId, {
-          id: uniqueStopId,
+          : rawStop.stop_lon;
+      let locationTypeNum: number | null = null;
+      const locStr = rawStop.location_type;
+      if (typeof locStr === "string" && locStr.trim() !== "") {
+        const p = parseInt(locStr, 10);
+        if (!isNaN(p)) locationTypeNum = p;
+      }
+      const parentStationFileId = rawStop.parent_station?.trim() || null;
+      const uniqueParentKey = parentStationFileId
+        ? `${system}-${parentStationFileId}`
+        : null;
+      const borough = getBoroughForCoordinates(
+        !isNaN(latitude) ? latitude : undefined,
+        !isNaN(longitude) ? longitude : undefined,
+      );
+      if (borough) stopsGeofencedCount++;
+
+      if (!enrichedStops.has(uniqueStopKey)) {
+        enrichedStops.set(uniqueStopKey, {
+          id: uniqueStopKey,
           originalStopId: originalStopId,
-          name: rawStop.stop_name || 'Unnamed Stop',
-          latitude: !isNaN(lat) ? lat : undefined,
-          longitude: !isNaN(lon) ? lon : undefined,
-          parentStationId: uniqueParentId,
+          name: rawStop.stop_name || "Unnamed Stop",
+          latitude: !isNaN(latitude) ? latitude : undefined,
+          longitude: !isNaN(longitude) ? longitude : undefined,
+          parentStationId: uniqueParentKey,
           locationType: locationTypeNum,
           childStopIds: new Set<string>(),
           servedByRouteIds: new Set<string>(),
           feedUrls: new Set<string>(),
-          system: system
-        })
+          system: system,
+          borough: borough,
+        });
       }
-    }
-    lirrStopsRaw.forEach((s) => processStop(s, 'LIRR'))
-    subwayStopsRaw.forEach((s) => processStop(s, 'SUBWAY')) // Use Title Case
-    mnrStopsRaw.forEach((s) => processStop(s, 'MNR'))
-    console.log(`Pass 2 finished. enrichedStops size: ${enrichedStops.size}`)
+    };
+    lirrStopsRaw.forEach((s) => processStop(s, "LIRR"));
+    subwayStopsRaw.forEach((s) => processStop(s, "SUBWAY"));
+    mnrStopsRaw.forEach((s) => processStop(s, "MNR"));
+    console.log(
+      `Pass 5 finished. enrichedStops size: ${enrichedStops.size}. Geofenced: ${stopsGeofencedCount}`,
+    );
+    // --- End Build enrichedStops ---
 
-    // --- Pass 3: Link children to parents ---
-    console.log('Pass 3: Linking child stops to parent stations...')
-    let linkedChildrenCount = 0
+    // --- 6. Link children to parents (Uses unique keys) ---
+    console.log("Pass 6: Linking child stops to parent stations...");
+    let linkedChildrenCount = 0;
     for (const [childKey, stopInfo] of enrichedStops.entries()) {
       if (stopInfo.parentStationId) {
-        const parentStopInfo = enrichedStops.get(stopInfo.parentStationId) // Direct lookup by parent ID
+        // parentStationId is unique key "SYSTEM-ID"
+        const parentStopInfo = enrichedStops.get(stopInfo.parentStationId);
         if (parentStopInfo) {
-          parentStopInfo.childStopIds.add(stopInfo.originalStopId)
-          linkedChildrenCount++
+          parentStopInfo.childStopIds.add(stopInfo.originalStopId); // Add ORIGINAL child ID
+          linkedChildrenCount++;
         }
       }
     }
-    console.log(`Pass 3 finished. Linked ${linkedChildrenCount} children.`)
+    console.log(`Pass 6 finished. Linked ${linkedChildrenCount} children.`);
+    // --- End Link Children ---
 
-    // --- Pass 4: Process stop_times to link routes/feeds ---
-    console.log('Pass 4: Processing stop times to link routes/feeds...')
-    const processStopTimes = (stopTimes: StopTimeBase[]) => {
-      let linksMade = 0
-      let checkedCount = 0
+    // --- 7. Build StopTime Lookup Map (Key: original_stop_id -> trip_id -> info) ---
+    console.log("Pass 7: Building stopTimeLookup map...");
+    const stopTimeLookup = new Map<string, Map<string, StaticStopTimeInfo>>();
+    for (const st of allStopTimesRaw) {
+      const stopId = st.stop_id?.trim();
+      const tripId = st.trip_id?.trim(); // Use raw tripId from stop_times
+      const stopSequenceStr = st.stop_sequence;
+      if (!stopId || !tripId || stopSequenceStr == null) continue;
+      const stopSequence = parseInt(stopSequenceStr, 10);
+      if (isNaN(stopSequence)) continue;
 
+      if (!stopTimeLookup.has(stopId)) {
+        stopTimeLookup.set(stopId, new Map<string, StaticStopTimeInfo>());
+      }
+      stopTimeLookup.get(stopId)?.set(tripId, {
+        scheduledArrivalTime: st.arrival_time?.trim() || null,
+        scheduledDepartureTime: st.departure_time?.trim() || null,
+        stopSequence: stopSequence,
+        track: st.track?.trim() || null,
+      });
+    }
+    console.log(
+      `Pass 7 finished. Built stopTimeLookup map for ${stopTimeLookup.size} stops.`,
+    );
+    // --- End StopTime Lookup ---
+
+    // --- 8. Process stop_times to link routes/feeds ---
+    console.log("Pass 8: Processing stop times to link routes/feeds...");
+    const processStopTimesForFeeds = (stopTimes: StopTimeBase[]) => {
+      let linksMade = 0;
       for (const st of stopTimes) {
-        checkedCount++
-        const stopTimeTripId = st.trip_id?.trim()
-        if (!stopTimeTripId) continue
+        const stopTimeTripId = st.trip_id?.trim();
+        if (!stopTimeTripId) continue;
+        const trip = tempTrips.get(stopTimeTripId); // Lookup trip by raw ID
+        if (!trip?.route_id || !trip.system) continue; // Need system from trip
 
-        const trip = tempTrips.get(stopTimeTripId)
-        if (!trip || !trip.route_id || !trip.system) continue
+        const routeMapKey = `${trip.system}-${trip.route_id}`; // Use trip's system + route_id
+        const route = tempRoutes.get(routeMapKey);
+        if (!route) continue; // Skip if route lookup fails
 
-        const routeMapKey = `${trip.system}-${trip.route_id}`
-        const route = tempRoutes.get(routeMapKey)
-        if (!route) continue
+        const originalStopId = st.stop_id?.trim();
+        if (!originalStopId) continue;
+        const childStopKey = `${trip.system}-${originalStopId}`; // Use trip's system + ST stop_id
+        const childStopInfo = enrichedStops.get(childStopKey);
+        if (!childStopInfo) continue;
 
-        const originalStopId = st.stop_id?.trim()
-        if (!originalStopId) continue
-        const childStopKey = `${trip.system}-${originalStopId}` // Key for the stop in stop_times
-        const childStopInfo = enrichedStops.get(childStopKey)
-        if (!childStopInfo) continue // Skip if stop_time references unknown stop for this system
-
-        const routeId = route.route_id
-        const routeSystem = route.system
-        const feedKey = `${routeSystem}-${routeId}`
-        const feedUrl = ROUTE_ID_TO_FEED_MAP[feedKey]
+        const routeId = route.route_id;
+        const routeSystem = route.system;
+        const feedKey = `${routeSystem}-${routeId}`;
+        const feedUrl = ROUTE_ID_TO_FEED_MAP[feedKey];
 
         if (feedUrl) {
-          let addedLink = false
+          let addedLink = false;
+          // Add using UNIQUE stop keys
           if (!childStopInfo.feedUrls.has(feedUrl)) {
-            childStopInfo.feedUrls.add(feedUrl)
-            addedLink = true
+            childStopInfo.feedUrls.add(feedUrl);
+            addedLink = true;
           }
           if (!childStopInfo.servedByRouteIds.has(routeId)) {
-            childStopInfo.servedByRouteIds.add(routeId)
-            addedLink = true
+            childStopInfo.servedByRouteIds.add(routeId);
+            addedLink = true;
           }
-
           if (childStopInfo.parentStationId) {
+            // parent ID is unique key
             const parentStopInfo = enrichedStops.get(
-              childStopInfo.parentStationId
-            )
+              childStopInfo.parentStationId,
+            );
             if (parentStopInfo) {
+              let addedToParent = false;
               if (!parentStopInfo.feedUrls.has(feedUrl)) {
-                parentStopInfo.feedUrls.add(feedUrl)
+                parentStopInfo.feedUrls.add(feedUrl);
+                addedToParent = true;
               }
               if (!parentStopInfo.servedByRouteIds.has(routeId)) {
-                parentStopInfo.servedByRouteIds.add(routeId)
+                parentStopInfo.servedByRouteIds.add(routeId);
+                addedToParent = true;
               }
+              if (addedToParent) addedLink = true;
             }
           }
-          if (addedLink) linksMade++
+          if (addedLink) linksMade++;
         }
-      }
+      } // End loop st
       console.log(
-        `Finished processing ${stopTimes.length} stop times. Links added/updated: ${linksMade}`
-      )
-    }
+        `Finished processing ${stopTimes.length} stop times for feeds. Links added/updated: ${linksMade}`,
+      );
+    };
+    processStopTimesForFeeds(allStopTimesRaw); // Process combined list
+    console.log("Pass 8 finished.");
+    // --- End Feed Linking ---
 
-    processStopTimes([
-      ...lirrStopTimesRaw,
-      ...subwayStopTimesRaw,
-      ...mnrStopTimesRaw
-    ])
-    console.log('Pass 4 finished.')
-
-    // After loading trips, build the route feed mapping
-    const routeFeedMap = await buildRouteFeedMapping([...tempTrips.values()])
-
-    // Add the route feed mapping to the static data
+    // Final staticData object
     staticData = {
       stops: enrichedStops,
       routes: tempRoutes,
-      trips: tempTrips,
-      routeFeedMap: new Map(
-        Object.entries(routeFeedMap).map(([key, value]) => [key, [value]])
-      )
-    }
+      trips: tempTrips, // Map keyed by raw trip_id
+      stopTimeLookup: stopTimeLookup,
+    };
+
+    // --- Final Sanity Checks ---
+    console.log("--- Final Sanity Checks ---");
+    const finalLIRR237 = staticData.stops.get("LIRR-237");
+    console.log(
+      `LIRR-237 (Penn) Feeds: [${finalLIRR237?.feedUrls ? Array.from(finalLIRR237.feedUrls) : "N/A"}]`,
+    );
+    console.log(
+      `LIRR-237 Children: [${finalLIRR237?.childStopIds ? Array.from(finalLIRR237.childStopIds) : "N/A"}]`,
+    ); // Should be empty? Check original_id?
+    const finalSubwayL11 = staticData.stops.get("SUBWAY-L11");
+    console.log(
+      `SUBWAY-L11 (Graham) Feeds: [${finalSubwayL11?.feedUrls ? Array.from(finalSubwayL11.feedUrls) : "N/A"}]`,
+    ); // Should be gtfs-l
+    console.log(
+      `SUBWAY-L11 Children: [${finalSubwayL11?.childStopIds ? Array.from(finalSubwayL11.childStopIds) : "N/A"}]`,
+    ); // Should be L11N, L11S
+    console.log(
+      `stopTimeLookup has LIRR Penn ('237')? ${staticData.stopTimeLookup.has("237")}`,
+    ); // Check lookup using ORIGINAL ID
+    console.log(
+      `stopTimeLookup has Subway Graham N ('L11N')? ${staticData.stopTimeLookup.has("L11N")}`,
+    );
+    console.log(`--- End Sanity Checks ---`);
 
     console.log(
-      `Static data loaded: ${enrichedStops.size} total stops processed.`
-    )
-    return staticData
+      `Static data loaded: ${enrichedStops.size} total stops processed.`,
+    );
+    return staticData;
   } catch (error) {
-    console.error('Fatal error loading static GTFS data:', error)
-    throw new Error('Could not load essential static GTFS data.')
+    console.error("Fatal error loading static GTFS data:", error);
+    staticData = null; // Ensure staticData is null on error
+    throw new Error("Could not load essential static GTFS data.");
   }
 }
 
-// Modify getStaticData to include the route feed mapping
-export async function getStaticData(): Promise<StaticData> {
-  if (staticData) return staticData
-
-  try {
-    // --- Define System Names and Paths Consistently (Use Title Case) ---
-    const systems = [
-      { name: 'LIRR' as const, path: path.join(BASE_DATA_PATH, 'LIRR') },
-      { name: 'SUBWAY' as const, path: path.join(BASE_DATA_PATH, 'NYCT') },
-      { name: 'MNR' as const, path: path.join(BASE_DATA_PATH, 'MNR') }
-    ]
-
-    console.log(`Loading static GTFS data...`)
-
-    // --- Load All Files Concurrently ---
-    const promises = systems.flatMap((sys) => [
-      parseCsvFile<any>(path.join(sys.path, 'stops.txt')),
-      parseCsvFile<any>(path.join(sys.path, 'routes.txt')),
-      parseCsvFile<any>(path.join(sys.path, 'trips.txt')),
-      parseCsvFile<StopTimeBase>(path.join(sys.path, 'stop_times.txt'))
-    ])
-    const results = await Promise.all(promises)
-
-    // Deconstruct results based on the order in promises array
-    const [
-      lirrStopsRaw,
-      lirrRoutesRaw,
-      lirrTripsRaw,
-      lirrStopTimesRaw,
-      subwayStopsRaw,
-      subwayRoutesRaw,
-      subwayTripsRaw,
-      subwayStopTimesRaw,
-      mnrStopsRaw,
-      mnrRoutesRaw,
-      mnrTripsRaw,
-      mnrStopTimesRaw
-    ] = results
-
-    // --- Build tempTrips map (Key: raw trip_id) ---
-    const tempTrips = new Map<string, StaticTripInfo>()
-    const addTripToMap = (t: any, system: StaticStopInfo['system']) => {
-      const tripId = t.trip_id?.trim()
-      const routeId = t.route_id?.trim()
-      if (!tripId || !routeId) return
-      tempTrips.set(tripId, {
-        trip_id: tripId,
-        route_id: routeId,
-        system: system,
-        service_id: t.service_id?.trim(),
-        direction_id: t.direction_id
-      })
-    }
-    lirrTripsRaw.forEach((t) => addTripToMap(t, 'LIRR'))
-    subwayTripsRaw.forEach((t) => addTripToMap(t, 'SUBWAY'))
-    mnrTripsRaw.forEach((t) => addTripToMap(t, 'MNR'))
-
-    // After loading trips, build the route feed mapping
-    const routeFeedMap = await buildRouteFeedMapping([...tempTrips.values()])
-
-    // Add the route feed mapping to the static data
-    staticData = {
-      stops: new Map(),
-      routes: new Map(),
-      trips: new Map(),
-      routeFeedMap: new Map(
-        Object.entries(routeFeedMap).map(([key, value]) => [key, [value]])
-      )
-    }
-
-    return staticData
-  } catch (error) {
-    console.error('Error loading static data:', error)
-    throw error
+// getStaticData function
+export function getStaticData(): StaticData {
+  if (!staticData) {
+    // Consider attempting loadStaticData here again or throwing a more specific error
+    throw new Error(
+      "Static data accessed before successful loading or after a loading error.",
+    );
   }
+  return staticData;
 }

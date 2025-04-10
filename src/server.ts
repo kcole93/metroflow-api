@@ -4,6 +4,8 @@ import * as dotenv from "dotenv";
 import routes from "./routes"; // Import combined routes
 import { loadProtobufDefinitions } from "./utils/protobufLoader";
 import { loadStaticData } from "./services/staticDataService";
+import { loadBoroughData } from "./services/geoService";
+import { refreshActiveServices } from "./services/calendarService";
 
 dotenv.config();
 
@@ -32,17 +34,22 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 // --- Server Startup ---
 async function startServer() {
   try {
-    // Pre-load necessary data before starting the server
     console.log("Initializing server...");
-    await loadProtobufDefinitions();
-    await loadStaticData(); // Load static data into memory
+    // Load essential data in parallel or sequence
+    await Promise.all([
+      loadProtobufDefinitions(),
+      loadBoroughData(), // <-- Load borough boundaries
+      refreshActiveServices(), // Calculate active services on startup
+    ]);
+    // Static data often depends on other setups, load last or separately
+    await loadStaticData(); // Ensure this runs after others if needed
 
     app.listen(port, () => {
       console.log(`⚡️[server]: Server is running at http://localhost:${port}`);
     });
   } catch (error) {
     console.error("🚨 Failed to start server:", error);
-    process.exit(1); // Exit if essential data failed to load
+    process.exit(1);
   }
 }
 

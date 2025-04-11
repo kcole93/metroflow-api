@@ -1,6 +1,10 @@
 // src/services/cacheService.ts
+import { LoggerService } from "../utils/logger";
 import NodeCache from "node-cache";
 import * as dotenv from "dotenv";
+
+const cacheLogger =
+  LoggerService.getInstance().createServiceLogger("CacheService");
 
 dotenv.config();
 
@@ -11,7 +15,7 @@ const cache = new NodeCache({
   useClones: false,
 });
 
-console.log(`Cache initialized with TTL: ${ttlSeconds} seconds.`);
+cacheLogger.log(`Cache initialized with TTL: ${ttlSeconds} seconds.`);
 
 export function getCache<T>(key: string): T | undefined {
   return cache.get<T>(key);
@@ -32,5 +36,5 @@ export function clearCacheKey(key: string): void {
 
 export function flushCache(): void {
   cache.flushAll();
-  console.log("Cache flushed.");
+  cacheLogger.log("Cache flushed.");
 }

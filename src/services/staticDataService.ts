@@ -1,21 +1,23 @@
 // src/services/staticDataService.ts
-import * as fs from "fs/promises";
+import { LoggerService } from "../utils/logger";
+import { parseCsvFile } from "../utils/csvParser";
 import * as path from "path";
-import Papa from "papaparse";
 import {
   StaticData,
   StaticStopInfo,
   StaticRouteInfo,
   StaticTripInfo,
-  StaticStopTimeInfo, // Make sure this is defined in types.ts
-  SystemType, // Make sure this is defined in types.ts ('LIRR' | 'SUBWAY' | 'MNR' ...)
+  StaticStopTimeInfo,
+  SystemType,
 } from "../types";
 import * as dotenv from "dotenv";
 import { getBoroughForCoordinates } from "./geoService";
-// ROUTE_ID_TO_FEED_MAP is needed here to link feeds
 import { ROUTE_ID_TO_FEED_MAP } from "../services/mtaService";
 
 dotenv.config();
+
+// getInstance logger specifically for static data
+const logger = LoggerService.getInstance().createServiceLogger("Static Data");
 
 let staticData: StaticData | null = null;
 const BASE_DATA_PATH =
@@ -28,60 +30,33 @@ interface StopTimeBase {
   departure_time?: string;
   stop_id: string;
   stop_sequence: string;
-  track?: string; // Include track if present
-  // Add other optional fields if they exist (pickup_type, drop_off_type)
+  track?: string;
 }
 
-// CSV Parser Function
-async function parseCsvFile<T extends object>(filePath: string): Promise<T[]> {
-  try {
-    // console.log(`Reading static file: ${filePath}`);
-    const fileContent = await fs.readFile(filePath, "utf8");
-    const result = Papa.parse<T>(fileContent, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: false, // Keep false for manual type handling
-    });
-    if (result.errors.length > 0) {
-      console.warn(
-        `Parsing errors in ${path.basename(filePath)}:`,
-        result.errors.slice(0, 5),
-      );
-    }
-    return result.data;
-  } catch (error) {
-    console.error(
-      `Error reading/parsing CSV ${path.basename(filePath)}:`,
-      error,
-    );
-    throw error; // Re-throw
-  }
-}
-
-// --- Main Data Loading Function ---
+// --- Main Static Data Loading Function ---
 export async function loadStaticData(): Promise<StaticData> {
   if (staticData) {
-    console.log("[Static Data] Returning cached static data.");
+    logger.log("Returning cached static data.");
     return staticData;
   }
 
-  // Define system paths (ensure these match your directory structure and SystemType)
+  // Define system paths to locate static data files
   const systems = [
     { name: "LIRR" as SystemType, path: path.join(BASE_DATA_PATH, "LIRR") },
     { name: "SUBWAY" as SystemType, path: path.join(BASE_DATA_PATH, "NYCT") },
     { name: "MNR" as SystemType, path: path.join(BASE_DATA_PATH, "MNR") },
   ];
 
-  console.log(`[Static Data] Loading static GTFS data...`);
+  logger.log("Loading static GTFS data...");
 
   try {
     // --- 1. Load All Raw Files ---
-    console.log("[Static Data] Phase 1: Loading raw CSV files...");
+    logger.log("Phase 1: Loading raw CSV files...");
     const promises = systems.flatMap((sys) => [
-      parseCsvFile<any>(path.join(sys.path, "stops.txt")),
-      parseCsvFile<any>(path.join(sys.path, "routes.txt")), // Expects route_id
-      parseCsvFile<any>(path.join(sys.path, "trips.txt")), // Expects trip_id, route_id, service_id, direction_id
-      parseCsvFile<StopTimeBase>(path.join(sys.path, "stop_times.txt")), // Expects trip_id, stop_id, stop_sequence, times, track?
+      parseCsvFile<any>(path.join(sys.path, "stops.txt"), logger),
+      parseCsvFile<any>(path.join(sys.path, "routes.txt"), logger),
+      parseCsvFile<any>(path.join(sys.path, "trips.txt"), logger),
+      parseCsvFile<StopTimeBase>(path.join(sys.path, "stop_times.txt"), logger),
     ]);
     const results = await Promise.all(promises);
     const [
@@ -104,41 +79,38 @@ export async function loadStaticData(): Promise<StaticData> {
       ...mnrStopTimesRaw,
     ];
     const allTripsRaw = [...lirrTripsRaw, ...subwayTripsRaw, ...mnrTripsRaw];
-    console.log("[Static Data] Phase 1 finished.");
-    // --- End File Loading ---
+    logger.log("Phase 1 finished.");
 
     // --- 2. Build tempRoutes Map (Key: SYSTEM-ROUTEID) ---
-    console.log("[Static Data] Phase 2: Building routes map...");
+    logger.log("Phase 2: Building routes map...");
     const tempRoutes = new Map<string, StaticRouteInfo>();
     const addRouteToMap = (r: any, system: SystemType) => {
       const routeId = r.route_id?.trim();
       if (!routeId) return;
       const uniqueKey = `${system}-${routeId}`;
       tempRoutes.set(uniqueKey, {
-        route_id: routeId, // Store trimmed
-        agency_id: r.agency_id?.trim() || undefined, // Store agency if present
+        route_id: routeId,
+        agency_id: r.agency_id?.trim() || undefined,
         route_short_name: r.route_short_name?.trim() || "",
         route_long_name: r.route_long_name?.trim() || "",
         route_type: r.route_type ? parseInt(r.route_type, 10) : undefined,
         route_color: r.route_color,
         route_text_color: r.route_text_color?.trim() || null,
-        system: system, // Assign system
+        system: system, // Assign system so that we can disambiguate later
       });
     };
     lirrRoutesRaw.forEach((r) => addRouteToMap(r, "LIRR"));
-    subwayRoutesRaw.forEach((r) => addRouteToMap(r, "SUBWAY")); // Use UPPERCASE
+    subwayRoutesRaw.forEach((r) => addRouteToMap(r, "SUBWAY"));
     mnrRoutesRaw.forEach((r) => addRouteToMap(r, "MNR"));
-    console.log(
-      `[Static Data] Phase 2 finished. Routes map size: ${tempRoutes.size}`,
-    );
-    // --- End tempRoutes ---
+    logger.log(`Phase 2 finished. Routes map size: ${tempRoutes.size}`);
 
     // --- 3. Process stop_times to find Trip Destinations (Key: raw trip_id) ---
-    console.log(
+    logger.log(
       "Pass 3: Processing stop_times to determine trip destinations...",
     );
     const tripDestinations = new Map<string, string>(); // Map: trip_id -> last_stop_id
     const tripMaxSequence = new Map<string, number>();
+
     const findDestinations = (stopTimes: StopTimeBase[]) => {
       for (const st of stopTimes) {
         const tripId = st.trip_id?.trim();
@@ -148,19 +120,18 @@ export async function loadStaticData(): Promise<StaticData> {
           const currentMax = tripMaxSequence.get(tripId) ?? -1;
           if (stopSequence > currentMax) {
             tripMaxSequence.set(tripId, stopSequence);
-            tripDestinations.set(tripId, st.stop_id?.trim() || ""); // Store trimmed stop_id
+            tripDestinations.set(tripId, st.stop_id?.trim() || "");
           }
         }
       }
     };
     findDestinations(allStopTimesRaw);
-    console.log(
+    logger.log(
       `Pass 3 finished. Found destinations for ${tripDestinations.size} trips.`,
     );
-    // --- End Destination Finding ---
 
     // --- 4. Build FINAL tempTrips map (Key: raw trip_id) ---
-    console.log("Pass 4: Building final tempTrips map...");
+    logger.log("Pass 4: Building final tempTrips map...");
     const tempTrips = new Map<string, StaticTripInfo>();
     const addTripToMap = (t: any, system: SystemType) => {
       const tripId = t.trip_id?.trim();
@@ -174,7 +145,6 @@ export async function loadStaticData(): Promise<StaticData> {
       }
       const destStopId = tripDestinations.get(tripId) || null; // Lookup destination ID
       tempTrips.set(tripId, {
-        // Use raw tripId as key
         // Explicitly list fields from StaticTripInfo type
         trip_id: tripId,
         route_id: routeId,
@@ -185,18 +155,17 @@ export async function loadStaticData(): Promise<StaticData> {
         direction_id: directionIdNum,
         block_id: t.block_id?.trim() || undefined,
         shape_id: t.shape_id?.trim() || undefined,
-        system: system, // Store system
+        system: system,
         destinationStopId: destStopId, // Store destination ID
       });
     };
     lirrTripsRaw.forEach((t) => addTripToMap(t, "LIRR"));
     subwayTripsRaw.forEach((t) => addTripToMap(t, "SUBWAY"));
     mnrTripsRaw.forEach((t) => addTripToMap(t, "MNR"));
-    console.log(`Pass 4 finished. Final tempTrips map size: ${tempTrips.size}`);
-    // --- End Build tempTrips ---
+    logger.log(`Pass 4 finished. Final tempTrips map size: ${tempTrips.size}`);
 
-    // --- 5. Build enrichedStops map (Key: SYSTEM-STOPID) + Geofencing ---
-    console.log(
+    // --- 5. Enrich static data ---
+    logger.log(
       "Pass 5: Processing raw stops into enriched map + geofencing...",
     );
     const enrichedStops = new Map<string, StaticStopInfo>();
@@ -249,13 +218,12 @@ export async function loadStaticData(): Promise<StaticData> {
     lirrStopsRaw.forEach((s) => processStop(s, "LIRR"));
     subwayStopsRaw.forEach((s) => processStop(s, "SUBWAY"));
     mnrStopsRaw.forEach((s) => processStop(s, "MNR"));
-    console.log(
+    logger.log(
       `Pass 5 finished. enrichedStops size: ${enrichedStops.size}. Geofenced: ${stopsGeofencedCount}`,
     );
-    // --- End Build enrichedStops ---
 
-    // --- 6. Link children to parents (Uses unique keys) ---
-    console.log("Pass 6: Linking child stops to parent stations...");
+    // --- 6. Link children to parents (using unique keys) ---
+    logger.log("Pass 6: Linking child stops to parent stations...");
     let linkedChildrenCount = 0;
     for (const [childKey, stopInfo] of enrichedStops.entries()) {
       if (stopInfo.parentStationId) {
@@ -267,11 +235,10 @@ export async function loadStaticData(): Promise<StaticData> {
         }
       }
     }
-    console.log(`Pass 6 finished. Linked ${linkedChildrenCount} children.`);
-    // --- End Link Children ---
+    logger.log(`Pass 6 finished. Linked ${linkedChildrenCount} children.`);
 
     // --- 7. Build StopTime Lookup Map (Key: original_stop_id -> trip_id -> info) ---
-    console.log("Pass 7: Building stopTimeLookup map...");
+    logger.log("Pass 7: Building stopTimeLookup map...");
     const stopTimeLookup = new Map<string, Map<string, StaticStopTimeInfo>>();
     for (const st of allStopTimesRaw) {
       const stopId = st.stop_id?.trim();
@@ -291,13 +258,12 @@ export async function loadStaticData(): Promise<StaticData> {
         track: st.track?.trim() || null,
       });
     }
-    console.log(
+    logger.log(
       `Pass 7 finished. Built stopTimeLookup map for ${stopTimeLookup.size} stops.`,
     );
-    // --- End StopTime Lookup ---
 
     // --- 8. Process stop_times to link routes/feeds ---
-    console.log("Pass 8: Processing stop times to link routes/feeds...");
+    logger.log("Pass 8: Processing stop times to link routes/feeds...");
     const processStopTimesForFeeds = (stopTimes: StopTimeBase[]) => {
       let linksMade = 0;
       for (const st of stopTimes) {
@@ -352,14 +318,13 @@ export async function loadStaticData(): Promise<StaticData> {
           }
           if (addedLink) linksMade++;
         }
-      } // End loop st
-      console.log(
+      }
+      logger.log(
         `Finished processing ${stopTimes.length} stop times for feeds. Links added/updated: ${linksMade}`,
       );
     };
     processStopTimesForFeeds(allStopTimesRaw); // Process combined list
-    console.log("Pass 8 finished.");
-    // --- End Feed Linking ---
+    logger.log("Pass 8 finished.");
 
     // Final staticData object
     staticData = {
@@ -368,37 +333,12 @@ export async function loadStaticData(): Promise<StaticData> {
       trips: tempTrips, // Map keyed by raw trip_id
       stopTimeLookup: stopTimeLookup,
     };
-
-    // --- Final Sanity Checks ---
-    console.log("--- Final Sanity Checks ---");
-    const finalLIRR237 = staticData.stops.get("LIRR-237");
-    console.log(
-      `LIRR-237 (Penn) Feeds: [${finalLIRR237?.feedUrls ? Array.from(finalLIRR237.feedUrls) : "N/A"}]`,
-    );
-    console.log(
-      `LIRR-237 Children: [${finalLIRR237?.childStopIds ? Array.from(finalLIRR237.childStopIds) : "N/A"}]`,
-    ); // Should be empty? Check original_id?
-    const finalSubwayL11 = staticData.stops.get("SUBWAY-L11");
-    console.log(
-      `SUBWAY-L11 (Graham) Feeds: [${finalSubwayL11?.feedUrls ? Array.from(finalSubwayL11.feedUrls) : "N/A"}]`,
-    ); // Should be gtfs-l
-    console.log(
-      `SUBWAY-L11 Children: [${finalSubwayL11?.childStopIds ? Array.from(finalSubwayL11.childStopIds) : "N/A"}]`,
-    ); // Should be L11N, L11S
-    console.log(
-      `stopTimeLookup has LIRR Penn ('237')? ${staticData.stopTimeLookup.has("237")}`,
-    ); // Check lookup using ORIGINAL ID
-    console.log(
-      `stopTimeLookup has Subway Graham N ('L11N')? ${staticData.stopTimeLookup.has("L11N")}`,
-    );
-    console.log(`--- End Sanity Checks ---`);
-
-    console.log(
+    logger.log(
       `Static data loaded: ${enrichedStops.size} total stops processed.`,
     );
     return staticData;
   } catch (error) {
-    console.error("Fatal error loading static GTFS data:", error);
+    logger.error(`Fatal error loading static GTFS data: ${error}`);
     staticData = null; // Ensure staticData is null on error
     throw new Error("Could not load essential static GTFS data.");
   }

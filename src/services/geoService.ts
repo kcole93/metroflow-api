@@ -1,4 +1,5 @@
 // src/services/geoService.ts
+import { LoggerService } from "../utils/logger";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as turfBooleanPointInPolygon from "@turf/boolean-point-in-polygon";
@@ -6,13 +7,14 @@ import * as turfHelpers from "@turf/helpers";
 import { Feature, Polygon, MultiPolygon } from "geojson";
 import * as dotenv from "dotenv";
 
+const geoLogger = LoggerService.getInstance().createServiceLogger("GeoService");
+
 dotenv.config();
 
 // --- Configuration ---
-// Make the path configurable via .env, default to a reasonable location
 const GEOJSON_PATH =
   process.env.BOROUGH_GEOJSON_PATH || "src/assets/geodata/nyc-boroughs.geojson";
-// Property name in GeoJSON features containing the borough name (adjust if needed)
+// Property name in GeoJSON features containing the borough name
 const BOROUGH_NAME_PROPERTY = process.env.BOROUGH_NAME_PROPERTY || "BoroName";
 
 // --- Module State ---
@@ -29,9 +31,7 @@ export async function loadBoroughData(): Promise<void> {
   }
 
   const absoluteGeoJsonPath = path.resolve(GEOJSON_PATH);
-  console.log(
-    `[GeoService] Loading borough boundaries from: ${absoluteGeoJsonPath}`,
-  );
+  geoLogger.log(`Loading borough boundaries from: ${absoluteGeoJsonPath}`);
 
   try {
     const geoJsonContent = await fs.readFile(absoluteGeoJsonPath, "utf8");
@@ -48,23 +48,23 @@ export async function loadBoroughData(): Promise<void> {
           f.geometry && f.properties && f.properties[BOROUGH_NAME_PROPERTY],
       );
       isDataLoaded = true;
-      console.log(
-        `[GeoService] Successfully loaded and parsed ${boroughFeatures.length} valid borough boundary features.`,
+      geoLogger.log(
+        `Successfully loaded and parsed ${boroughFeatures.length} valid borough boundary features.`,
       );
     } else {
-      console.error(
-        "[GeoService] Invalid GeoJSON format. Expected FeatureCollection with features array.",
+      geoLogger.error(
+        "Invalid GeoJSON format. Expected FeatureCollection with features array.",
       );
       isLoadingError = true; // Mark loading as failed
     }
   } catch (geoError: any) {
     if (geoError.code === "ENOENT") {
-      console.error(
-        `[GeoService] Error loading boundaries: File not found at ${absoluteGeoJsonPath}. Geofencing disabled.`,
+      geoLogger.error(
+        `Error loading boundaries: File not found at ${absoluteGeoJsonPath}. Geofencing disabled.`,
       );
     } else {
-      console.error(
-        "[GeoService] Error loading or parsing borough boundaries GeoJSON:",
+      geoLogger.error(
+        "Error loading or parsing borough boundaries GeoJSON:",
         geoError,
       );
     }
@@ -101,11 +101,10 @@ export function getBoroughForCoordinates(
         return typeof boroughName === "string" ? boroughName.trim() : null;
       }
     }
-  } catch (checkError) {
-    // Log error during the check itself (less likely)
-    console.error(
-      `[GeoService] Error checking point [${longitude}, ${latitude}] against polygons:`,
-      checkError,
+  } catch (error) {
+    // Log any errors during the check itself
+    geoLogger.error(
+      `Error checking point [${longitude}, ${latitude}] against polygons:`,
     );
   }
 

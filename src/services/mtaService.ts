@@ -892,23 +892,34 @@ export async function getDeparturesForStation(
   return combinedDepartures;
 }
 
+const AGENCY_ID_TO_SYSTEM: { [key: string]: string } = {
+  MTASBWY: "SUBWAY",
+  "MTA NYCT": "SUBWAY",
+  MTABC: "BUS",
+  LI: "LIRR",
+  MNR: "MNR",
+};
+
 // --- getServiceAlerts Function ---
 export async function getServiceAlerts(
-  targetLines?: string[], // Optional: Filter by specific line short names
-  filterActiveNow = false, // Optional: Only show alerts currently active
+  targetLines?: string[], // Expects ["SUBWAY-1", "LIRR-1"], etc.
+  filterActiveNow = false,
 ): Promise<ServiceAlert[]> {
   const feedUrl = ALERT_FEEDS.ALL;
   const feedName = "all_service_alerts";
   logger.log(
-    `[Alerts Service] Fetching ${feedName}. Filters: lines=${
+    `[Alerts Service] Fetching ${feedName}. Filters: targetLines=${
       targetLines?.join(",") || "N/A"
     }, activeNow=${filterActiveNow}`,
   );
 
+  const staticData = getStaticData();
+  const staticRoutes = staticData.routes;
+
   const fetchedData = await fetchAndParseFeed(feedUrl, feedName);
   const message = fetchedData?.message;
 
-  let allAlerts: ServiceAlert[] = []; // Start with empty list
+  let allAlerts: ServiceAlert[] = [];
 
   if (!message?.entity?.length) {
     logger.warn(
@@ -917,49 +928,53 @@ export async function getServiceAlerts(
     return allAlerts;
   }
 
-  const staticData = getStaticData(); // Needed for route mapping
+  logger.log(
+    `[Alerts Service] Processing ${message.entity.length} entities from feed...`,
+  );
 
-  // --- Parse ALL alerts first ---
   for (const entity of message.entity) {
     const alert = entity.alert;
     if (alert) {
       try {
-        const affectedLinesShortNames: string[] = []; // Store short names
+        const affectedSystemRouteIds = new Set<string>(); // Use Set for automatic deduplication
+
         if (alert.informed_entity) {
           for (const informed of alert.informed_entity) {
-            if (informed.route_id) {
-              const alertRouteId = informed.route_id;
-              // Try to find route info using potential keys
-              let routeInfo: StaticRouteInfo | undefined | null = null;
-              let potentialKeySubway = `SUBWAY-${alertRouteId}`;
-              let potentialKeyLIRR = `LIRR-${alertRouteId}`;
-              let potentialKeyMNR = `MNR-${alertRouteId}`;
-              routeInfo =
-                (await staticData).routes.get(potentialKeySubway) ||
-                (await staticData).routes.get(potentialKeyLIRR) ||
-                (await staticData).routes.get(potentialKeyMNR);
+            // --- Disambiguation Logic ---
+            let potentialSystemRouteId: string | null = null;
+            const routeId = informed.route_id; // Raw route_id ("1")
+            const agencyId = informed.agency_id; // Agency ID ("MTA NYCT")
 
-              const shortName = routeInfo?.route_short_name?.trim();
-              // Use short name if available and not already added
-              if (
-                shortName &&
-                shortName !== "" &&
-                !affectedLinesShortNames.includes(shortName)
-              ) {
-                affectedLinesShortNames.push(shortName);
-              } else if (
-                !routeInfo &&
-                !affectedLinesShortNames.includes(alertRouteId)
-              ) {
-                // Fallback to raw route ID if lookup failed
-                // logger.log(`[Alerts] Route info not found for affected route ID: ${alertRouteId}`);
-                affectedLinesShortNames.push(alertRouteId);
+            if (routeId) {
+              if (agencyId && AGENCY_ID_TO_SYSTEM[agencyId]) {
+                const systemPrefix = AGENCY_ID_TO_SYSTEM[agencyId];
+                potentialSystemRouteId = `${systemPrefix}-${routeId}`;
+              } else {
+                // Fallback/Warning: No agency_id or unknown agency_id
+                // If no agency context, we CANNOT reliably disambiguate.
+                // We'll just log a warning and skip this specific route_id.
+                logger.warn(
+                  `[Alerts Service] Alert ${entity.id}: Cannot reliably map route_id "${routeId}" to a system. Missing or unknown agency_id "${agencyId}". Skipping this route.`,
+                );
+                potentialSystemRouteId = null; // Ensure it's not added
               }
-              // Note: LIRR/MNR might primarily use long names, adapt if needed
+
+              // Validate against static data
+              if (
+                potentialSystemRouteId &&
+                staticRoutes.has(potentialSystemRouteId)
+              ) {
+                affectedSystemRouteIds.add(potentialSystemRouteId);
+              } else if (potentialSystemRouteId) {
+                // Log if we constructed an ID but it's not in static data
+                logger.warn(
+                  `[Alerts Service] Alert ${entity.id}: Constructed System-RouteId "${potentialSystemRouteId}" but it's not found in staticRoutes map. Skipping.`,
+                );
+              }
             }
-            // TODO: Add logic for stopId, agencyId if needed
-          }
-        }
+            // TODO: Handle informed.stop_id to provide station-specific alerts?
+          } // end informed_entity loop
+        } // end if(informed_entity)
 
         const getText = (field: any): string | undefined =>
           field?.translation?.[0]?.text;
@@ -973,9 +988,10 @@ export async function getServiceAlerts(
         // Create the full alert object
         allAlerts.push({
           id: entity.id,
+          agency_id: entity.agency_id,
           title: title,
           description: description,
-          affectedLines: affectedLinesShortNames.sort(), // Store processed short names
+          affectedLines: Array.from(affectedSystemRouteIds).sort(), // Store processed short names
           startDate: startDateEpoch
             ? new Date(Number(startDateEpoch) * 1000)
             : undefined,
@@ -985,7 +1001,10 @@ export async function getServiceAlerts(
           url: url,
         });
       } catch (alertError) {
-        /* ... error handling ... */
+        logger.error(
+          `[Alerts Service] Error processing alert entity ${entity.id}:`,
+          alertError,
+        );
       }
     } // end if(alert)
   } // end for loop

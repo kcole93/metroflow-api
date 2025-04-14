@@ -72,6 +72,7 @@ export interface Departure {
 
 export interface ServiceAlert {
   id: string; // From the alert feed entity id
+  agency_id: string;
   title: string;
   description: string;
   affectedLines: string[]; // Route short names (e.g., ["6", "LIRR-Babylon"])

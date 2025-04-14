@@ -31,7 +31,9 @@ export async function loadProtobufDefinitions(): Promise<protobuf.Type> {
   }
 
   const absoluteProtoPaths = protoFiles.map((p) => path.resolve(p));
-  logger.log(`Resolved absolute paths for proto files:`, absoluteProtoPaths);
+  logger.log(
+    `Resolved absolute paths for proto files: ${absoluteProtoPaths.join(", ")}`,
+  );
 
   try {
     logger.log(

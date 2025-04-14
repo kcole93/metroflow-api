@@ -50,7 +50,6 @@ export async function loadProtobufDefinitions(): Promise<protobuf.Type> {
     root.resolvePath = (origin: string, target: string) => {
       return path.resolve(includeBaseDir, target);
     };
-    // --------------------------------------
 
     // Load the files specified by absolute paths
     await root.load(absoluteProtoPaths, { keepCase: true });

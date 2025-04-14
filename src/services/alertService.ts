@@ -1,10 +1,7 @@
 import { ServiceAlert } from "../types";
-import { LoggerService } from "../utils/logger";
+import { logger } from "../utils/logger";
 import { fetchAndParseFeed } from "../utils/gtfsFeedParser";
 import { getStaticData } from "./staticDataService";
-
-// getInstance logger specifically for Alert Service
-const logger = LoggerService.getInstance().createServiceLogger("Alert Service");
 
 const MTA_API_BASE = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds";
 
@@ -30,7 +27,7 @@ export async function getServiceAlerts(
 ): Promise<ServiceAlert[]> {
   const feedUrl = ALERT_FEEDS.ALL;
   const feedName = "all_service_alerts";
-  logger.log(
+  logger.info(
     `[Alerts Service] Fetching ${feedName}. Filters: targetLines=${
       targetLines?.join(",") || "N/A"
     }, activeNow=${filterActiveNow}`,
@@ -51,7 +48,7 @@ export async function getServiceAlerts(
     return allAlerts;
   }
 
-  logger.log(
+  logger.info(
     `[Alerts Service] Processing ${message.entity.length} entities from feed...`,
   );
 
@@ -102,9 +99,9 @@ export async function getServiceAlerts(
                 // Log if we constructed an ID (meaning it wasn't MTABC and had agency info)
                 // but it's not found in our static data map. This might indicate
                 // stale static data or a new route ID in the feed.
-                //   logger.warn(
-                //     `[Alerts Service] Alert ${entity.id}: Constructed System-RouteId "${potentialSystemRouteId}" but it's not found in staticRoutes map. Skipping.`,
-                //   );
+                logger.debug(
+                  `[Alerts Service] Alert ${entity.id}: Constructed System-RouteId "${potentialSystemRouteId}" but it's not found in staticRoutes map. Skipping.`,
+                );
               }
             }
             // TODO: Handle informed.stop_id if needed (map stop to routes?)
@@ -132,7 +129,9 @@ export async function getServiceAlerts(
             // Fallback: If no 'en-html', use the first translation's text
             description = descriptionTranslations[0].text;
             // Optional: Log if we fell back
-            // logger.warn(`[Alerts Service] Alert ${entity.id}: No 'en-html' description found. Using first available translation.`);
+            logger.debug(
+              `[Alerts Service] Alert ${entity.id}: No 'en-html' description found. Using first available translation.`,
+            );
           }
         }
         const url = getText(alert.url);
@@ -162,7 +161,7 @@ export async function getServiceAlerts(
       }
     } // end if(alert)
   } // end for loop
-  logger.log(
+  logger.info(
     `[Alerts Service] Parsed ${allAlerts.length} total alerts from feed.`,
   );
 
@@ -181,7 +180,7 @@ export async function getServiceAlerts(
       const notEnded = !end || end >= now;
       return started && notEnded;
     });
-    logger.log(
+    logger.info(
       `[Alerts Service] Filtered to ${filteredAlerts.length} active alerts.`,
     );
   }
@@ -198,7 +197,7 @@ export async function getServiceAlerts(
         (alertLine) => targetLinesUpper.includes(alertLine.toUpperCase()), // Case-insensitive check
       );
     });
-    logger.log(
+    logger.info(
       `[Alerts Service] Filtered to ${
         filteredAlerts.length
       } alerts affecting lines: [${targetLines.join(", ")}]`,

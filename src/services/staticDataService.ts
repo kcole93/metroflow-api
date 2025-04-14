@@ -1,5 +1,5 @@
 // src/services/staticDataService.ts
-import { LoggerService } from "../utils/logger";
+import { logger } from "../utils/logger";
 import { parseCsvFile } from "../utils/csvParser";
 import * as path from "path";
 import {
@@ -15,9 +15,6 @@ import { getBoroughForCoordinates } from "./geoService";
 import { ROUTE_ID_TO_FEED_MAP } from "../services/mtaService";
 
 dotenv.config();
-
-// getInstance logger specifically for static data
-const logger = LoggerService.getInstance().createServiceLogger("Static Data");
 
 let staticData: StaticData | null = null;
 const BASE_DATA_PATH =
@@ -36,7 +33,7 @@ interface StopTimeBase {
 // --- Main Static Data Loading Function ---
 export async function loadStaticData(): Promise<StaticData> {
   if (staticData) {
-    logger.log("Returning cached static data.");
+    logger.info("Returning cached static data.");
     return staticData;
   }
 
@@ -47,11 +44,11 @@ export async function loadStaticData(): Promise<StaticData> {
     { name: "MNR" as SystemType, path: path.join(BASE_DATA_PATH, "MNR") },
   ];
 
-  logger.log("Loading static GTFS data...");
+  logger.info("Loading static GTFS data...");
 
   try {
     // --- 1. Load All Raw Files ---
-    logger.log("Phase 1: Loading raw CSV files...");
+    logger.info("Phase 1: Loading raw CSV files...");
     const promises = systems.flatMap((sys) => [
       parseCsvFile<any>(path.join(sys.path, "stops.txt"), logger),
       parseCsvFile<any>(path.join(sys.path, "routes.txt"), logger),
@@ -79,10 +76,10 @@ export async function loadStaticData(): Promise<StaticData> {
       ...mnrStopTimesRaw,
     ];
     const allTripsRaw = [...lirrTripsRaw, ...subwayTripsRaw, ...mnrTripsRaw];
-    logger.log("Phase 1 finished.");
+    logger.info("Phase 1 finished.");
 
     // --- 2. Build tempRoutes Map (Key: SYSTEM-ROUTEID) ---
-    logger.log("Phase 2: Building routes map...");
+    logger.info("Phase 2: Building routes map...");
     const tempRoutes = new Map<string, StaticRouteInfo>();
     const addRouteToMap = (r: any, system: SystemType) => {
       const routeId = r.route_id?.trim();
@@ -102,10 +99,10 @@ export async function loadStaticData(): Promise<StaticData> {
     lirrRoutesRaw.forEach((r) => addRouteToMap(r, "LIRR"));
     subwayRoutesRaw.forEach((r) => addRouteToMap(r, "SUBWAY"));
     mnrRoutesRaw.forEach((r) => addRouteToMap(r, "MNR"));
-    logger.log(`Phase 2 finished. Routes map size: ${tempRoutes.size}`);
+    logger.info(`Phase 2 finished. Routes map size: ${tempRoutes.size}`);
 
     // --- 3. Process stop_times to find Trip Destinations (Key: raw trip_id) ---
-    logger.log(
+    logger.info(
       "Pass 3: Processing stop_times to determine trip destinations...",
     );
     const tripDestinations = new Map<string, string>(); // Map: trip_id -> last_stop_id
@@ -126,12 +123,12 @@ export async function loadStaticData(): Promise<StaticData> {
       }
     };
     findDestinations(allStopTimesRaw);
-    logger.log(
+    logger.info(
       `Pass 3 finished. Found destinations for ${tripDestinations.size} trips.`,
     );
 
     // --- 4. Build FINAL tempTrips map (Key: raw trip_id) ---
-    logger.log("Pass 4: Building final tempTrips map...");
+    logger.info("Pass 4: Building final tempTrips map...");
     const tempTrips = new Map<string, StaticTripInfo>();
     const addTripToMap = (t: any, system: SystemType) => {
       const tripId = t.trip_id?.trim();
@@ -162,10 +159,10 @@ export async function loadStaticData(): Promise<StaticData> {
     lirrTripsRaw.forEach((t) => addTripToMap(t, "LIRR"));
     subwayTripsRaw.forEach((t) => addTripToMap(t, "SUBWAY"));
     mnrTripsRaw.forEach((t) => addTripToMap(t, "MNR"));
-    logger.log(`Pass 4 finished. Final tempTrips map size: ${tempTrips.size}`);
+    logger.info(`Pass 4 finished. Final tempTrips map size: ${tempTrips.size}`);
 
     // --- 5. Enrich static data ---
-    logger.log(
+    logger.info(
       "Pass 5: Processing raw stops into enriched map + geofencing...",
     );
     const enrichedStops = new Map<string, StaticStopInfo>();
@@ -218,12 +215,12 @@ export async function loadStaticData(): Promise<StaticData> {
     lirrStopsRaw.forEach((s) => processStop(s, "LIRR"));
     subwayStopsRaw.forEach((s) => processStop(s, "SUBWAY"));
     mnrStopsRaw.forEach((s) => processStop(s, "MNR"));
-    logger.log(
+    logger.info(
       `Pass 5 finished. enrichedStops size: ${enrichedStops.size}. Geofenced: ${stopsGeofencedCount}`,
     );
 
     // --- 6. Link children to parents (using unique keys) ---
-    logger.log("Pass 6: Linking child stops to parent stations...");
+    logger.info("Pass 6: Linking child stops to parent stations...");
     let linkedChildrenCount = 0;
     for (const [childKey, stopInfo] of enrichedStops.entries()) {
       if (stopInfo.parentStationId) {
@@ -235,10 +232,10 @@ export async function loadStaticData(): Promise<StaticData> {
         }
       }
     }
-    logger.log(`Pass 6 finished. Linked ${linkedChildrenCount} children.`);
+    logger.info(`Pass 6 finished. Linked ${linkedChildrenCount} children.`);
 
     // --- 7. Build StopTime Lookup Map (Key: original_stop_id -> trip_id -> info) ---
-    logger.log("Pass 7: Building stopTimeLookup map...");
+    logger.info("Pass 7: Building stopTimeLookup map...");
     const stopTimeLookup = new Map<string, Map<string, StaticStopTimeInfo>>();
     for (const st of allStopTimesRaw) {
       const stopId = st.stop_id?.trim();
@@ -258,12 +255,12 @@ export async function loadStaticData(): Promise<StaticData> {
         track: st.track?.trim() || null,
       });
     }
-    logger.log(
+    logger.info(
       `Pass 7 finished. Built stopTimeLookup map for ${stopTimeLookup.size} stops.`,
     );
 
     // --- 8. Process stop_times to link routes/feeds ---
-    logger.log("Pass 8: Processing stop times to link routes/feeds...");
+    logger.info("Pass 8: Processing stop times to link routes/feeds...");
     const processStopTimesForFeeds = (stopTimes: StopTimeBase[]) => {
       let linksMade = 0;
       for (const st of stopTimes) {
@@ -319,12 +316,12 @@ export async function loadStaticData(): Promise<StaticData> {
           if (addedLink) linksMade++;
         }
       }
-      logger.log(
+      logger.info(
         `Finished processing ${stopTimes.length} stop times for feeds. Links added/updated: ${linksMade}`,
       );
     };
     processStopTimesForFeeds(allStopTimesRaw); // Process combined list
-    logger.log("Pass 8 finished.");
+    logger.info("Pass 8 finished.");
 
     // Final staticData object
     staticData = {
@@ -333,7 +330,7 @@ export async function loadStaticData(): Promise<StaticData> {
       trips: tempTrips, // Map keyed by raw trip_id
       stopTimeLookup: stopTimeLookup,
     };
-    logger.log(
+    logger.info(
       `Static data loaded: ${enrichedStops.size} total stops processed.`,
     );
     return staticData;

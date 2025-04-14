@@ -1,4 +1,4 @@
-import { LoggerService } from "../utils/logger";
+import { logger } from "../utils/logger";
 import { fetchAndParseFeed } from "../utils/gtfsFeedParser";
 import { getStaticData } from "./staticDataService";
 import { getActiveServicesForToday } from "./calendarService";
@@ -14,9 +14,6 @@ import {
   PeakStatus,
 } from "../types";
 import * as dotenv from "dotenv";
-
-// getInstance logger specifically for API Service
-const logger = LoggerService.getInstance().createServiceLogger("API Service");
 
 dotenv.config();
 
@@ -197,9 +194,9 @@ export async function getDeparturesForStation(
   // If no children, use the station's own ORIGINAL stop ID for matching STUs
   if (originalChildStopIds.size === 0) {
     if (requestedStationInfo.originalStopId) {
-      // logger.log(
-      //   `[Departures] No child stops for ${requestedUniqueStationId}, using own original ID: ${requestedStationInfo.originalStopId}.`,
-      // );
+      logger.debug(
+        `[Departures] No child stops for ${requestedUniqueStationId}, using own original ID: ${requestedStationInfo.originalStopId}.`,
+      );
       originalChildStopIds.add(requestedStationInfo.originalStopId);
     } else {
       logger.warn(
@@ -213,13 +210,13 @@ export async function getDeparturesForStation(
   // Note: For LIRR/MNR, feedUrlsToFetch might be empty but we'll still run static fallback
   // if there are no feeds to fetch
 
-  // logger.log(
-  //   `[Departures] Fetching for ${
-  //     requestedStationInfo.name
-  //   } (${requestedUniqueStationId}), checking ORIGINAL stop IDs: [${Array.from(
-  //     originalChildStopIds,
-  //   ).join(", ")}] from feeds: ${feedUrlsToFetch.join(", ") || "None"}`,
-  // );
+  logger.debug(
+    `[Departures] Fetching for ${
+      requestedStationInfo.name
+    } (${requestedUniqueStationId}), checking ORIGINAL stop IDs: [${Array.from(
+      originalChildStopIds,
+    ).join(", ")}] from feeds: ${feedUrlsToFetch.join(", ") || "None"}`,
+  );
 
   // Fetch feeds in parallel, keeping track of source URL
   const feedPromises = feedUrlsToFetch.map(async (url) => {
@@ -244,7 +241,7 @@ export async function getDeparturesForStation(
   try {
     const feedFetchResults = await Promise.all(feedPromises);
 
-    logger.log(
+    logger.info(
       `[Departures] Processing results for ${feedFetchResults.length} fetched feeds...`,
     );
     for (const { url: feedUrl, result: fetchedData } of feedFetchResults) {
@@ -273,7 +270,7 @@ export async function getDeparturesForStation(
         logger.warn(` -> Could not determine system for ${feedUrl}. Skipping.`);
         continue;
       }
-      // logger.log(`    -> Processing feed for System: ${systemName}`); // Reduce noise
+      logger.debug(`    -> Processing feed for System: ${systemName}`);
 
       for (const entity of decodedEntities) {
         const trip_update = entity.trip_update;
@@ -403,11 +400,11 @@ export async function getDeparturesForStation(
                 if (systemName === "SUBWAY") {
                   const nyctTripExt =
                     rtTrip?.[".transit_realtime.nyct_trip_descriptor"]; // Access nested extension
-                  // logger.log(
-                  //   `      [Direction] NYCT Trip Descriptor: ${JSON.stringify(
-                  //     nyctTripExt,
-                  //   )}`,
-                  // );
+                  logger.debug(
+                    `      [Direction] NYCT Trip Descriptor: ${JSON.stringify(
+                      nyctTripExt,
+                    )}`,
+                  );
                   if (systemName === "SUBWAY" && nyctTripExt?.direction) {
                     // Use the documented NYCT direction if available for SUBWAY
                     if (nyctTripExt.direction === 1) {
@@ -417,12 +414,12 @@ export async function getDeparturesForStation(
                       // 3 = SOUTH in Protobuff Enum
                       direction = "S";
                     }
-                    // logger.log(
-                    //   `      [Direction] Using NYCT Trip Descriptor Direction: ${nyctTripExt.direction} -> ${direction}`,
-                    // ); // Log source
-                    // logger.log(
-                    //   `[Direction] Set direction from source: ${destSource}`,
-                    // );
+                    logger.debug(
+                      `      [Direction] Using NYCT Trip Descriptor Direction: ${nyctTripExt.direction} -> ${direction}`,
+                    ); // Log source
+                    logger.debug(
+                      `[Direction] Set direction from source: ${destSource}`,
+                    );
                   }
                 } else if (systemName === "LIRR" || systemName === "MNR") {
                   // Use static tripInfo.direction_id for LIRR/MNR
@@ -432,13 +429,13 @@ export async function getDeparturesForStation(
                     if (dirId === 0) direction = "W";
                     else if (dirId === 1) direction = "E";
                     else direction = "Unknown";
-                    // logger.log(
-                    //   `      [Direction Static Check ${systemName}] Found direction_id: ${dirId} = ${direction}for trip ${tripIdFromFeed}`,
-                    // );
+                    logger.debug(
+                      `      [Direction Static Check ${systemName}] Found direction_id: ${dirId} = ${direction}for trip ${tripIdFromFeed}`,
+                    );
                   } else {
-                    // logger.log(
-                    //   `      [Direction Static Check ${systemName}] Static tripInfo or direction_id not found for trip ${tripIdFromFeed}`,
-                    // );
+                    logger.debug(
+                      `      [Direction Static Check ${systemName}] Static tripInfo or direction_id not found for trip ${tripIdFromFeed}`,
+                    );
                   }
                 }
 
@@ -453,9 +450,9 @@ export async function getDeparturesForStation(
                     direction = "E"; // Keep E/W for LIRR/MNR
                   else if (lastChar === "W") direction = "W";
                   if (direction !== "Unknown") {
-                    // logger.log(
-                    //   `      [Direction] Using Stop ID Suffix Fallback: ${lastChar} -> ${direction}`,
-                    // ); // Log source
+                    logger.debug(
+                      `      [Direction] Using Stop ID Suffix Fallback: ${lastChar} -> ${direction}`,
+                    ); // Log source
                   }
                 }
                 // If still Unknown, it remains Unknown
@@ -503,9 +500,9 @@ export async function getDeparturesForStation(
                   }
                 }
                 if (relevantTime === null && !hasRealtimePrediction) {
-                  // logger.log(
-                  //   `    [STU Skip] Matched ${stuOriginalStopId}, but NO real-time prediction available in STU.`,
-                  // );
+                  logger.debug(
+                    `    [STU Skip] Matched ${stuOriginalStopId}, but NO real-time prediction available in STU.`,
+                  );
                   continue; // Skip if no time available at all
                 }
 
@@ -574,16 +571,16 @@ export async function getDeparturesForStation(
     (requestedStationInfo.system === "SUBWAY" &&
       realtimeDepartures.length === 0)
   ) {
-    // logger.log(
-    //   `[Departures] Checking static fallback for ${requestedStationInfo.system}...`,
-    // );
+    logger.debug(
+      `[Departures] Checking static fallback for ${requestedStationInfo.system}...`,
+    );
 
     try {
       const systemName = requestedStationInfo.system; // LIRR, MNR, or SUBWAY
       const activeServices = await getActiveServicesForToday(); // Get today's active service IDs
-      // logger.log(
-      //   `[Static Fallback ${systemName}] Found ${activeServices.size} active services today.`,
-      // );
+      logger.debug(
+        `[Static Fallback ${systemName}] Found ${activeServices.size} active services today.`,
+      );
       // Iterate through the station's platforms (original IDs)
       for (const platformId of originalChildStopIds) {
         const tripsStoppingAtPlatform =
@@ -630,9 +627,9 @@ export async function getDeparturesForStation(
               parseDateStr = format(nextDay, "yyyy-MM-dd");
               // Adjust time string for parsing
               parseTimeStr = `${hours % 24}:${scheduledTimeStr.substring(3)}`; // e.g., "01:10:00"
-              // logger.log(
-              //   `  Adjusted next-day time: ${scheduledTimeStr} -> ${parseDateStr} ${parseTimeStr}`,
-              // );
+              logger.debug(
+                `  Adjusted next-day time: ${scheduledTimeStr} -> ${parseDateStr} ${parseTimeStr}`,
+              );
             }
             // Use date-fns parse (safer than new Date with just time string)
             scheduledTime = dateParse(
@@ -657,7 +654,10 @@ export async function getDeparturesForStation(
             relevantTime > cutoffTime
           ) {
             // Log if skipping based on time
-            // if (relevantTime) logger.log(` -> Skipping scheduled ${staticTripId}, time ${new Date(relevantTime).toISOString()} out of window`);
+            if (relevantTime)
+              logger.debug(
+                ` -> Skipping scheduled ${staticTripId}, time ${new Date(relevantTime).toISOString()} out of window`,
+              );
             continue;
           }
 
@@ -719,9 +719,9 @@ export async function getDeparturesForStation(
           // --- End Create Scheduled ---
         } // End loop tripsStoppingHere
       } // End loop platformId
-      // logger.log(
-      //   `[Departures] Added ${addedScheduled} scheduled departures via static fallback for ${systemName}.`,
-      // );
+      logger.debug(
+        `[Departures] Added ${addedScheduled} scheduled departures via static fallback for ${systemName}.`,
+      );
     } catch (fallbackError) {
       logger.error(
         `[Departures] Error during static fallback for ${requestedStationInfo.system}:`,
@@ -735,7 +735,7 @@ export async function getDeparturesForStation(
   const combinedDepartures = [...realtimeDepartures, ...scheduledDepartures];
   totalDeparturesCreated = combinedDepartures.length; // Final count
 
-  logger.log(
+  logger.info(
     `[Departures] Finished Processing. RT Updates: ${totalUpdatesProcessed}. Final Departures (RT+Sched): ${totalDeparturesCreated} for ${requestedUniqueStationId}.`,
   );
 

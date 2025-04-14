@@ -1,12 +1,9 @@
 // src/services/calendarService.ts
 import { parseCsvFile } from "../utils/csvParser";
-import { LoggerService } from "../utils/logger";
+import { logger } from "../utils/logger";
 import * as path from "path";
 import { format, parse, startOfDay, isToday } from "date-fns";
 import * as dotenv from "dotenv";
-
-const logger =
-  LoggerService.getInstance().createServiceLogger("Calendar Service");
 
 dotenv.config();
 
@@ -46,7 +43,7 @@ interface RawCalendarDateEntry {
 // --- Calculate Active Services for a Specific Date ---
 async function calculateActiveServices(targetDate: Date): Promise<Set<string>> {
   const calculationDateStr = format(targetDate, "yyyy-MM-dd");
-  logger.log(`Calculating active services for ${calculationDateStr}...`);
+  logger.info(`Calculating active services for ${calculationDateStr}...`);
   const activeServices = new Set<string>();
   isLoadingError = false; // Reset error flag for this attempt
 
@@ -66,18 +63,12 @@ async function calculateActiveServices(targetDate: Date): Promise<Set<string>> {
   try {
     // Load all relevant calendar files concurrently
     const [
-      lirrCalendarRaw,
       subwayCalendarRaw,
       mnrCalendarRaw,
       lirrCalendarDatesRaw,
-      subwayCalendarDatesRaw,
       mnrCalendarDatesRaw,
     ] = await Promise.all([
       // Use .catch() to return empty array if a file is missing, preventing Promise.all failure
-      parseCsvFile<RawCalendarEntry>(
-        path.join(LIRR_PATH, "calendar.txt"),
-        logger,
-      ).catch(() => []),
       parseCsvFile<RawCalendarEntry>(
         path.join(SUBWAY_PATH, "calendar.txt"),
         logger,
@@ -91,28 +82,19 @@ async function calculateActiveServices(targetDate: Date): Promise<Set<string>> {
         logger,
       ).catch(() => []),
       parseCsvFile<RawCalendarDateEntry>(
-        path.join(SUBWAY_PATH, "calendar_dates.txt"),
-        logger,
-      ).catch(() => []),
-      parseCsvFile<RawCalendarDateEntry>(
         path.join(MNR_PATH, "calendar_dates.txt"),
         logger,
       ).catch(() => []),
     ]);
 
     // Combine data from all systems
-    const allCalendarRaw = [
-      ...lirrCalendarRaw,
-      ...subwayCalendarRaw,
-      ...mnrCalendarRaw,
-    ];
+    const allCalendarRaw = [...subwayCalendarRaw, ...mnrCalendarRaw];
     const allCalendarDatesRaw = [
       ...lirrCalendarDatesRaw,
-      ...subwayCalendarDatesRaw,
       ...mnrCalendarDatesRaw,
     ];
 
-    logger.log(
+    logger.info(
       `Processing ${allCalendarRaw.length} calendar entries and ${allCalendarDatesRaw.length} date exceptions.`,
     );
 
@@ -169,7 +151,7 @@ async function calculateActiveServices(targetDate: Date): Promise<Set<string>> {
       }
     }
 
-    logger.log(
+    logger.info(
       `Found ${activeServices.size} services active for ${calculationDateStr}.`,
     );
     return activeServices;
@@ -191,7 +173,7 @@ export async function getActiveServicesForToday(): Promise<Set<string>> {
   // - OR Loaded date is not today
   // - OR Previous loading attempt resulted in an error
   if (!lastLoadedDate || !isToday(lastLoadedDate) || isLoadingError) {
-    logger.log(
+    logger.info(
       `Recalculating active services for today (${format(today, "yyyy-MM-dd")}). Previous load date: ${lastLoadedDate ? format(lastLoadedDate, "yyyy-MM-dd") : "N/A"}`,
     );
     activeServicesToday = await calculateActiveServices(today);
@@ -200,7 +182,7 @@ export async function getActiveServicesForToday(): Promise<Set<string>> {
       lastLoadedDate = today;
     }
   } else {
-    logger.log("Using cached active services for today.");
+    logger.info("Using cached active services for today.");
   }
 
   // Return the current set (either newly calculated or cached)
@@ -210,7 +192,7 @@ export async function getActiveServicesForToday(): Promise<Set<string>> {
 // --- Force Refresh Function ---
 // Useful if you want to trigger a reload manually (e.g., after midnight)
 export async function refreshActiveServices(): Promise<void> {
-  logger.log("Forcing refresh of active services for today...");
+  logger.info("Forcing refresh of active services for today...");
   lastLoadedDate = null; // Invalidate cache date
   isLoadingError = false; // Reset error flag
   await getActiveServicesForToday(); // Trigger recalculation immediately

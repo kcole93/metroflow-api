@@ -1,9 +1,7 @@
 import { Router, Response, RequestHandler } from "express";
 import * as mtaService from "../services/mtaService";
 import { getServiceAlerts } from "../services/alertService";
-import { LoggerService } from "../utils/logger";
-
-const logger = LoggerService.getInstance().createServiceLogger("API Routes");
+import { logger } from "../utils/logger";
 
 const router = Router();
 
@@ -92,7 +90,7 @@ const getDeparturesHandler: RequestHandler = async (req, res) => {
       return;
     }
     limitMinutes = parsedLimit;
-    logger.log(
+    logger.info(
       `[Departures Route] Applying time limit: ${limitMinutes} minutes`,
     );
   }
@@ -127,7 +125,7 @@ const getAlertsHandler: RequestHandler = async (req, res) => {
       .split(",")
       .map((line) => line.trim().toUpperCase()) // Normalize to uppercase? Match your static data case.
       .filter((line) => line.length > 0);
-    logger.log(
+    logger.info(
       `[Alerts Route] Filtering for lines: [${targetLines.join(", ")}]`,
     );
   }
@@ -136,7 +134,7 @@ const getAlertsHandler: RequestHandler = async (req, res) => {
   const activeNowQuery = req.query.activeNow as string | undefined;
   const filterActiveNow = activeNowQuery === "true" || activeNowQuery === "1"; // Check for true/1
   if (filterActiveNow) {
-    logger.log(`[Alerts Route] Filtering for alerts active now.`);
+    logger.info(`[Alerts Route] Filtering for alerts active now.`);
   }
 
   try {

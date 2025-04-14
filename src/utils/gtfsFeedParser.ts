@@ -1,9 +1,6 @@
 import { getCache, setCache, clearCacheKey } from "../services/cacheService";
 import { loadProtobufDefinitions } from "../utils/protobufLoader";
-import { LoggerService } from "./logger";
-
-const logger =
-  LoggerService.getInstance().createServiceLogger("GFTS Feed Parser");
+import { logger } from "./logger";
 
 // --- Fetch and parse a provided GTFS feed ---
 export async function fetchAndParseFeed(

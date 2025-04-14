@@ -1,5 +1,6 @@
 // src/server.ts
 import express, { Express, Request, Response, NextFunction } from "express";
+import { logger } from "./utils/logger";
 import * as dotenv from "dotenv";
 import routes from "./routes"; // Import combined routes
 import { loadProtobufDefinitions } from "./utils/protobufLoader";
@@ -27,14 +28,14 @@ app.get("/", (req: Request, res: Response) => {
 
 // Global Error Handler (Optional - basic example)
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  console.error("Unhandled error:", err.stack);
+  logger.error("Unhandled error:", err.stack);
   res.status(500).json({ error: "Something went wrong on the server." });
 });
 
 // --- Server Startup ---
 async function startServer() {
   try {
-    console.log("Initializing server...");
+    logger.info("Initializing server...");
     // Load essential data in parallel or sequence
     await Promise.all([
       loadProtobufDefinitions(),
@@ -45,7 +46,9 @@ async function startServer() {
     await loadStaticData(); // Ensure this runs after others if needed
 
     app.listen(port, () => {
-      console.log(`⚡️[server]: Server is running at http://localhost:${port}`);
+      console.info(
+        `⚡️[server]: Server is running at http://localhost:${port}`,
+      );
     });
   } catch (error) {
     console.error("🚨 Failed to start server:", error);

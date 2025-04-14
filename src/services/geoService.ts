@@ -1,14 +1,11 @@
 // src/services/geoService.ts
-import { LoggerService } from "../utils/logger";
+import { logger } from "../utils/logger";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as turfBooleanPointInPolygon from "@turf/boolean-point-in-polygon";
 import * as turfHelpers from "@turf/helpers";
 import { Feature, Polygon, MultiPolygon } from "geojson";
 import * as dotenv from "dotenv";
-
-const geoLogger = LoggerService.getInstance().createServiceLogger("GeoService");
-
 dotenv.config();
 
 // --- Configuration ---
@@ -31,7 +28,7 @@ export async function loadBoroughData(): Promise<void> {
   }
 
   const absoluteGeoJsonPath = path.resolve(GEOJSON_PATH);
-  geoLogger.log(`Loading borough boundaries from: ${absoluteGeoJsonPath}`);
+  logger.info(`Loading borough boundaries from: ${absoluteGeoJsonPath}`);
 
   try {
     const geoJsonContent = await fs.readFile(absoluteGeoJsonPath, "utf8");
@@ -48,22 +45,22 @@ export async function loadBoroughData(): Promise<void> {
           f.geometry && f.properties && f.properties[BOROUGH_NAME_PROPERTY],
       );
       isDataLoaded = true;
-      geoLogger.log(
+      logger.info(
         `Successfully loaded and parsed ${boroughFeatures.length} valid borough boundary features.`,
       );
     } else {
-      geoLogger.error(
+      logger.error(
         "Invalid GeoJSON format. Expected FeatureCollection with features array.",
       );
       isLoadingError = true; // Mark loading as failed
     }
   } catch (geoError: any) {
     if (geoError.code === "ENOENT") {
-      geoLogger.error(
+      logger.error(
         `Error loading boundaries: File not found at ${absoluteGeoJsonPath}. Geofencing disabled.`,
       );
     } else {
-      geoLogger.error(
+      logger.error(
         "Error loading or parsing borough boundaries GeoJSON:",
         geoError,
       );
@@ -103,7 +100,7 @@ export function getBoroughForCoordinates(
     }
   } catch (error) {
     // Log any errors during the check itself
-    geoLogger.error(
+    logger.error(
       `Error checking point [${longitude}, ${latitude}] against polygons:`,
     );
   }

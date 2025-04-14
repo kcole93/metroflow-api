@@ -940,39 +940,50 @@ export async function getServiceAlerts(
 
         if (alert.informed_entity) {
           for (const informed of alert.informed_entity) {
-            // --- Disambiguation Logic ---
+            const agencyId = informed.agency_id; // Get agency ID first
+
+            // --- Skip Bus Routes (MTABC) ---
+            if (agencyId === "MTABC") {
+              // logger.warn(`[Alerts Service] Alert ${entity.id}: Skipping informed_entity with agency_id "MTABC".`);
+              continue; // Skip the rest of the loop for this informed_entity
+            }
+
+            // --- Disambiguation Logic (for non-skipped entities) ---
             let potentialSystemRouteId: string | null = null;
             const routeId = informed.route_id; // Raw route_id ("1")
-            const agencyId = informed.agency_id; // Agency ID ("MTA NYCT")
 
+            // We only care about entities that specify a route
             if (routeId) {
               if (agencyId && AGENCY_ID_TO_SYSTEM[agencyId]) {
+                // We have a known agency and a route ID
                 const systemPrefix = AGENCY_ID_TO_SYSTEM[agencyId];
                 potentialSystemRouteId = `${systemPrefix}-${routeId}`;
+                // logger.warn(`[Alerts Service] Alert ${entity.id}: Mapped agency "${agencyId}" + route "${routeId}" to "${potentialSystemRouteId}"`);
               } else {
-                // Fallback/Warning: No agency_id or unknown agency_id
+                // Fallback/Warning: No agency_id or unknown agency_id for a route
                 // If no agency context, we CANNOT reliably disambiguate.
-                // We'll just log a warning and skip this specific route_id.
                 logger.warn(
-                  `[Alerts Service] Alert ${entity.id}: Cannot reliably map route_id "${routeId}" to a system. Missing or unknown agency_id "${agencyId}". Skipping this route.`,
+                  `[Alerts Service] Alert ${entity.id}: Cannot reliably map route_id "${routeId}" to a system. Missing or unknown agency_id "${agencyId}". Skipping this route entity.`,
                 );
                 potentialSystemRouteId = null; // Ensure it's not added
               }
 
-              // Validate against static data
+              // Validate constructed ID against static data AND add to Set
               if (
                 potentialSystemRouteId &&
                 staticRoutes.has(potentialSystemRouteId)
               ) {
                 affectedSystemRouteIds.add(potentialSystemRouteId);
               } else if (potentialSystemRouteId) {
-                // Log if we constructed an ID but it's not in static data
+                // Log if we constructed an ID (meaning it wasn't MTABC and had agency info)
+                // but it's not found in our static data map. This might indicate
+                // stale static data or a new route ID in the feed.
                 logger.warn(
                   `[Alerts Service] Alert ${entity.id}: Constructed System-RouteId "${potentialSystemRouteId}" but it's not found in staticRoutes map. Skipping.`,
                 );
               }
             }
-            // TODO: Handle informed.stop_id to provide station-specific alerts?
+            // TODO: Handle informed.stop_id if needed (map stop to routes?)
           } // end informed_entity loop
         } // end if(informed_entity)
 
@@ -1032,11 +1043,11 @@ export async function getServiceAlerts(
     );
   }
 
-  // 2. Filter by Target Lines (case-insensitive comparison recommended)
+  // 2. Filter by Target Lines
   if (targetLines && targetLines.length > 0) {
-    // Normalize targetLines from query param (already done in route handler if needed)
-    // Ensure case matches how affectedLinesShortNames were stored (e.g., both uppercase)
-    const targetLinesUpper = targetLines.map((l) => l.toUpperCase()); // Example normalization
+    // Normalize targetLines from query param
+    // Ensure case matches how affectedLinesShortNames were stored
+    const targetLinesUpper = targetLines.map((l) => l.toUpperCase());
 
     filteredAlerts = filteredAlerts.filter((alert) => {
       // Check if ANY of the alert's affected lines match ANY of the target lines

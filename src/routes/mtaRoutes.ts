@@ -1,5 +1,9 @@
 import { Router, Response, RequestHandler } from "express";
 import * as mtaService from "../services/mtaService";
+import { getServiceAlerts } from "../services/alertService";
+import { LoggerService } from "../utils/logger";
+
+const logger = LoggerService.getInstance().createServiceLogger("API Routes");
 
 const router = Router();
 
@@ -14,7 +18,7 @@ const handleServiceError = (
   res: Response,
   defaultMessage: string,
 ) => {
-  console.error("Error handled in route:", err);
+  logger.error("Error handled in route:", err);
   const statusCode =
     err instanceof Object &&
     "statusCode" in err &&
@@ -88,7 +92,7 @@ const getDeparturesHandler: RequestHandler = async (req, res) => {
       return;
     }
     limitMinutes = parsedLimit;
-    console.log(
+    logger.log(
       `[Departures Route] Applying time limit: ${limitMinutes} minutes`,
     );
   }
@@ -109,7 +113,7 @@ const getDeparturesHandler: RequestHandler = async (req, res) => {
   }
 };
 router.get("/departures/:stationId", getDeparturesHandler);
-// GET /api/v1/departures/:stationId (e.g., /departures/L03 for Penn LIRR)
+// GET /api/v1/departures/:stationId (e.g., /departures/LIRR-3 for Penn LIRR)
 router.get("/departures/:stationId", getDeparturesHandler);
 
 // GET /api/v1/alerts
@@ -123,7 +127,7 @@ const getAlertsHandler: RequestHandler = async (req, res) => {
       .split(",")
       .map((line) => line.trim().toUpperCase()) // Normalize to uppercase? Match your static data case.
       .filter((line) => line.length > 0);
-    console.log(
+    logger.log(
       `[Alerts Route] Filtering for lines: [${targetLines.join(", ")}]`,
     );
   }
@@ -132,15 +136,12 @@ const getAlertsHandler: RequestHandler = async (req, res) => {
   const activeNowQuery = req.query.activeNow as string | undefined;
   const filterActiveNow = activeNowQuery === "true" || activeNowQuery === "1"; // Check for true/1
   if (filterActiveNow) {
-    console.log(`[Alerts Route] Filtering for alerts active now.`);
+    logger.log(`[Alerts Route] Filtering for alerts active now.`);
   }
 
   try {
     // Pass filters to the service function
-    const alerts = await mtaService.getServiceAlerts(
-      targetLines,
-      filterActiveNow,
-    );
+    const alerts = await getServiceAlerts(targetLines, filterActiveNow);
     res.json(alerts);
   } catch (err) {
     handleServiceError(err, res, "Failed to retrieve service alerts.");

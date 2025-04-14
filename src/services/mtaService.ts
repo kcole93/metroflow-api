@@ -1,13 +1,11 @@
 import { LoggerService } from "../utils/logger";
-import { loadProtobufDefinitions } from "../utils/protobufLoader";
-import { getCache, setCache, clearCacheKey } from "./cacheService";
+import { fetchAndParseFeed } from "../utils/gtfsFeedParser";
 import { getStaticData } from "./staticDataService";
 import { getActiveServicesForToday } from "./calendarService";
 import { parse as dateParse, format } from "date-fns";
 import {
   Station,
   Departure,
-  ServiceAlert,
   StaticRouteInfo,
   StaticStopInfo,
   Direction,
@@ -23,7 +21,9 @@ const logger = LoggerService.getInstance().createServiceLogger("API Service");
 dotenv.config();
 
 // --- Feed URL Constants ---
-const MTA_API_BASE = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds";
+const MTA_API_BASE =
+  process.env.MTA_API_BASE ||
+  "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds";
 
 export const SUBWAY_FEEDS = {
   ACE: `${MTA_API_BASE}/nyct%2Fgtfs-ace`,
@@ -37,13 +37,6 @@ export const SUBWAY_FEEDS = {
 };
 export const LIRR_FEED = `${MTA_API_BASE}/lirr%2Fgtfs-lirr`;
 export const MNR_FEED = `${MTA_API_BASE}/mnr%2Fgtfs-mnr`;
-
-export const ALERT_FEEDS = {
-  SUBWAY: `${MTA_API_BASE}/camsys%2Fsubway-alerts`,
-  LIRR: `${MTA_API_BASE}/camsys%2Flirr-alerts`,
-  MNR: `${MTA_API_BASE}/camsys%2Fmnr-alerts`,
-  ALL: `${MTA_API_BASE}/camsys%2Fall-alerts`,
-};
 
 // --- Route ID to Feed URL Map ---
 export const ROUTE_ID_TO_FEED_MAP: { [key: string]: string } = {
@@ -96,126 +89,6 @@ export const ROUTE_ID_TO_FEED_MAP: { [key: string]: string } = {
   "MNR-5": MNR_FEED,
   "MNR-6": MNR_FEED,
 };
-
-// --- Fetch and parse a provided GTFS feed ---
-async function fetchAndParseFeed(
-  url: string,
-  feedName: string,
-): Promise<{ message: any; feedObject: any } | null> {
-  const cacheKey = `feed_${feedName}_${url.replace(/[^a-zA-Z0-9]/g, "_")}`;
-  const cachedData = getCache<{ message: any; feedObject: any }>(cacheKey);
-
-  if (cachedData) {
-    const messageIsEmpty =
-      !cachedData.message ||
-      !cachedData.message.entity ||
-      cachedData.message.entity.length === 0;
-    const objectIsEmpty =
-      !cachedData.feedObject ||
-      !cachedData.feedObject.entity ||
-      cachedData.feedObject.entity.length === 0;
-    if (messageIsEmpty && objectIsEmpty) {
-      logger.warn(
-        `[Fetch] Cache hit for ${feedName} but data seems empty. Bypassing cache once.`,
-      );
-      clearCacheKey(cacheKey);
-    } else {
-      return cachedData;
-    }
-  }
-
-  try {
-    const FeedMessage = await loadProtobufDefinitions();
-    const fetchOptions = {
-      signal: AbortSignal.timeout(25000),
-    };
-
-    const response = await fetch(url, fetchOptions);
-    if (!response.ok) {
-      const errorBody = await response
-        .text()
-        .catch(() => "Could not read error body");
-      logger.error(
-        `[Fetch] API Request Error Status ${
-          response.status
-        } for ${feedName}: ${errorBody.slice(0, 1000)}`,
-      );
-      return null;
-    }
-
-    const contentType = response.headers.get("content-type");
-    if (contentType?.includes("html") || contentType?.includes("json")) {
-      logger.error(
-        `[Fetch] Received likely error page Content-Type for ${feedName}: ${contentType}.`,
-      );
-      const textBody = await response.text().catch(() => "Could not read body");
-      logger.error(
-        `[Fetch] Error page body for ${feedName}: ${textBody.slice(0, 500)}...`,
-      );
-      return null;
-    } else if (
-      !contentType?.includes("octet-stream") &&
-      !contentType?.includes("protobuf")
-    ) {
-      // logger.warn( // Reduce noise
-      //     `[Fetch] Non-standard Content-Type for ${feedName}: ${contentType}. Attempting to parse anyway.`
-      // );
-    }
-
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength === 0) {
-      logger.warn(
-        `[Fetch] Received EMPTY buffer for feed ${feedName} (${url}).`,
-      );
-      return null;
-    }
-
-    let message: any = null;
-    try {
-      message = FeedMessage.decode(new Uint8Array(buffer));
-      if (!message || !message.entity || !Array.isArray(message.entity)) {
-        logger.warn(
-          `[Fetch] Decoded message for ${feedName} is missing 'entity' field, not an array, or message is null.`,
-        );
-        return null;
-      }
-      // logger.log(`[Fetch] Decoded ${message.entity.length} entities for ${feedName}.`); // Reduce noise
-    } catch (decodeError) {
-      logger.error(
-        `[Fetch] Protobuf DECODING FAILED for ${feedName}:`,
-        decodeError,
-      );
-      return null;
-    }
-
-    let feedObject: any = { entity: [], header: {} };
-    try {
-      if (message && message.entity && Array.isArray(message.entity)) {
-        feedObject = FeedMessage.toObject(message, {
-          longs: String,
-          enums: String,
-          bytes: String,
-          arrays: true,
-          objects: true,
-          oneofs: true,
-        });
-      }
-    } catch (toObjectError) {
-      // logger.warn(`[Fetch] FeedMessage.toObject failed for ${feedName}. Error:`, toObjectError); // Reduce noise
-    }
-
-    const result = { message, feedObject };
-    const cacheUrl = url.toLowerCase();
-    setCache(cacheKey, result);
-    return result;
-  } catch (error: any) {
-    logger.error(`[Fetch] Error for ${feedName} (${url}):`, error);
-    if (error.name === "AbortError") {
-      logger.error(`[Fetch] Request TIMED OUT for ${feedName}`);
-    }
-    return null;
-  }
-}
 
 // --- getStations Function ---
 export async function getStations(
@@ -324,9 +197,9 @@ export async function getDeparturesForStation(
   // If no children, use the station's own ORIGINAL stop ID for matching STUs
   if (originalChildStopIds.size === 0) {
     if (requestedStationInfo.originalStopId) {
-      logger.log(
-        `[Departures] No child stops for ${requestedUniqueStationId}, using own original ID: ${requestedStationInfo.originalStopId}.`,
-      );
+      // logger.log(
+      //   `[Departures] No child stops for ${requestedUniqueStationId}, using own original ID: ${requestedStationInfo.originalStopId}.`,
+      // );
       originalChildStopIds.add(requestedStationInfo.originalStopId);
     } else {
       logger.warn(
@@ -340,13 +213,13 @@ export async function getDeparturesForStation(
   // Note: For LIRR/MNR, feedUrlsToFetch might be empty but we'll still run static fallback
   // if there are no feeds to fetch
 
-  logger.log(
-    `[Departures] Fetching for ${
-      requestedStationInfo.name
-    } (${requestedUniqueStationId}), checking ORIGINAL stop IDs: [${Array.from(
-      originalChildStopIds,
-    ).join(", ")}] from feeds: ${feedUrlsToFetch.join(", ") || "None"}`,
-  );
+  // logger.log(
+  //   `[Departures] Fetching for ${
+  //     requestedStationInfo.name
+  //   } (${requestedUniqueStationId}), checking ORIGINAL stop IDs: [${Array.from(
+  //     originalChildStopIds,
+  //   ).join(", ")}] from feeds: ${feedUrlsToFetch.join(", ") || "None"}`,
+  // );
 
   // Fetch feeds in parallel, keeping track of source URL
   const feedPromises = feedUrlsToFetch.map(async (url) => {
@@ -444,7 +317,7 @@ export async function getDeparturesForStation(
                 destSource = "Last Stop Name";
                 destinationBorough = destStopInfo.borough || null;
               } else {
-                logger.log(
+                logger.warn(
                   `      [Dest Calc] Failed lookup for destination stop key: ${destStopKey}`,
                 ); // Log lookup failure
               }
@@ -530,11 +403,11 @@ export async function getDeparturesForStation(
                 if (systemName === "SUBWAY") {
                   const nyctTripExt =
                     rtTrip?.[".transit_realtime.nyct_trip_descriptor"]; // Access nested extension
-                  logger.log(
-                    `      [Direction] NYCT Trip Descriptor: ${JSON.stringify(
-                      nyctTripExt,
-                    )}`,
-                  );
+                  // logger.log(
+                  //   `      [Direction] NYCT Trip Descriptor: ${JSON.stringify(
+                  //     nyctTripExt,
+                  //   )}`,
+                  // );
                   if (systemName === "SUBWAY" && nyctTripExt?.direction) {
                     // Use the documented NYCT direction if available for SUBWAY
                     if (nyctTripExt.direction === 1) {
@@ -544,12 +417,12 @@ export async function getDeparturesForStation(
                       // 3 = SOUTH in Protobuff Enum
                       direction = "S";
                     }
-                    logger.log(
-                      `      [Direction] Using NYCT Trip Descriptor Direction: ${nyctTripExt.direction} -> ${direction}`,
-                    ); // Log source
-                    logger.log(
-                      `[Direction] Set direction from source: ${destSource}`,
-                    );
+                    // logger.log(
+                    //   `      [Direction] Using NYCT Trip Descriptor Direction: ${nyctTripExt.direction} -> ${direction}`,
+                    // ); // Log source
+                    // logger.log(
+                    //   `[Direction] Set direction from source: ${destSource}`,
+                    // );
                   }
                 } else if (systemName === "LIRR" || systemName === "MNR") {
                   // Use static tripInfo.direction_id for LIRR/MNR
@@ -559,13 +432,13 @@ export async function getDeparturesForStation(
                     if (dirId === 0) direction = "W";
                     else if (dirId === 1) direction = "E";
                     else direction = "Unknown";
-                    logger.log(
-                      `      [Direction Static Check ${systemName}] Found direction_id: ${dirId} = ${direction}for trip ${tripIdFromFeed}`,
-                    );
+                    // logger.log(
+                    //   `      [Direction Static Check ${systemName}] Found direction_id: ${dirId} = ${direction}for trip ${tripIdFromFeed}`,
+                    // );
                   } else {
-                    logger.log(
-                      `      [Direction Static Check ${systemName}] Static tripInfo or direction_id not found for trip ${tripIdFromFeed}`,
-                    );
+                    // logger.log(
+                    //   `      [Direction Static Check ${systemName}] Static tripInfo or direction_id not found for trip ${tripIdFromFeed}`,
+                    // );
                   }
                 }
 
@@ -580,9 +453,9 @@ export async function getDeparturesForStation(
                     direction = "E"; // Keep E/W for LIRR/MNR
                   else if (lastChar === "W") direction = "W";
                   if (direction !== "Unknown") {
-                    logger.log(
-                      `      [Direction] Using Stop ID Suffix Fallback: ${lastChar} -> ${direction}`,
-                    ); // Log source
+                    // logger.log(
+                    //   `      [Direction] Using Stop ID Suffix Fallback: ${lastChar} -> ${direction}`,
+                    // ); // Log source
                   }
                 }
                 // If still Unknown, it remains Unknown
@@ -630,16 +503,16 @@ export async function getDeparturesForStation(
                   }
                 }
                 if (relevantTime === null && !hasRealtimePrediction) {
-                  logger.log(
-                    `    [STU Skip] Matched ${stuOriginalStopId}, but NO real-time prediction available in STU.`,
-                  );
+                  // logger.log(
+                  //   `    [STU Skip] Matched ${stuOriginalStopId}, but NO real-time prediction available in STU.`,
+                  // );
                   continue; // Skip if no time available at all
                 }
 
                 // If we somehow have hasRealtimePrediction=false but relevantTime!=null (shouldn't happen), log warning
                 if (!hasRealtimePrediction && relevantTime !== null) {
                   logger.warn(
-                    `    [Logic Warn] hasRealtimePrediction is false but relevantTime has value for ${stuOriginalStopId}`,
+                    `hasRealtimePrediction is false but relevantTime has value for ${stuOriginalStopId}`,
                   );
                 }
                 // --- End Status ---
@@ -668,7 +541,6 @@ export async function getDeparturesForStation(
                 };
                 realtimeDepartures.push(departure);
                 totalDeparturesCreated++;
-                // --- End Create ---
               } catch (mappingError) {
                 logger.error(
                   `      -> [Mapping Error] Failed create Departure for stop ${stuOriginalStopId}, trip ${tripIdFromFeed}:`,
@@ -702,16 +574,16 @@ export async function getDeparturesForStation(
     (requestedStationInfo.system === "SUBWAY" &&
       realtimeDepartures.length === 0)
   ) {
-    logger.log(
-      `[Departures] Checking static fallback for ${requestedStationInfo.system}...`,
-    );
+    // logger.log(
+    //   `[Departures] Checking static fallback for ${requestedStationInfo.system}...`,
+    // );
 
     try {
       const systemName = requestedStationInfo.system; // LIRR, MNR, or SUBWAY
       const activeServices = await getActiveServicesForToday(); // Get today's active service IDs
-      logger.log(
-        `[Static Fallback ${systemName}] Found ${activeServices.size} active services today.`,
-      );
+      // logger.log(
+      //   `[Static Fallback ${systemName}] Found ${activeServices.size} active services today.`,
+      // );
       // Iterate through the station's platforms (original IDs)
       for (const platformId of originalChildStopIds) {
         const tripsStoppingAtPlatform =
@@ -758,9 +630,9 @@ export async function getDeparturesForStation(
               parseDateStr = format(nextDay, "yyyy-MM-dd");
               // Adjust time string for parsing
               parseTimeStr = `${hours % 24}:${scheduledTimeStr.substring(3)}`; // e.g., "01:10:00"
-              logger.log(
-                `  Adjusted next-day time: ${scheduledTimeStr} -> ${parseDateStr} ${parseTimeStr}`,
-              );
+              // logger.log(
+              //   `  Adjusted next-day time: ${scheduledTimeStr} -> ${parseDateStr} ${parseTimeStr}`,
+              // );
             }
             // Use date-fns parse (safer than new Date with just time string)
             scheduledTime = dateParse(
@@ -847,9 +719,9 @@ export async function getDeparturesForStation(
           // --- End Create Scheduled ---
         } // End loop tripsStoppingHere
       } // End loop platformId
-      logger.log(
-        `[Departures] Added ${addedScheduled} scheduled departures via static fallback for ${systemName}.`,
-      );
+      // logger.log(
+      //   `[Departures] Added ${addedScheduled} scheduled departures via static fallback for ${systemName}.`,
+      // );
     } catch (fallbackError) {
       logger.error(
         `[Departures] Error during static fallback for ${requestedStationInfo.system}:`,
@@ -890,183 +762,4 @@ export async function getDeparturesForStation(
   });
 
   return combinedDepartures;
-}
-
-const AGENCY_ID_TO_SYSTEM: { [key: string]: string } = {
-  MTASBWY: "SUBWAY",
-  "MTA NYCT": "SUBWAY",
-  MTABC: "BUS",
-  LI: "LIRR",
-  MNR: "MNR",
-};
-
-// --- getServiceAlerts Function ---
-export async function getServiceAlerts(
-  targetLines?: string[], // Expects ["SUBWAY-1", "LIRR-1"], etc.
-  filterActiveNow = false,
-): Promise<ServiceAlert[]> {
-  const feedUrl = ALERT_FEEDS.ALL;
-  const feedName = "all_service_alerts";
-  logger.log(
-    `[Alerts Service] Fetching ${feedName}. Filters: targetLines=${
-      targetLines?.join(",") || "N/A"
-    }, activeNow=${filterActiveNow}`,
-  );
-
-  const staticData = getStaticData();
-  const staticRoutes = staticData.routes;
-
-  const fetchedData = await fetchAndParseFeed(feedUrl, feedName);
-  const message = fetchedData?.message;
-
-  let allAlerts: ServiceAlert[] = [];
-
-  if (!message?.entity?.length) {
-    logger.warn(
-      "[Alerts Service] No entities found in the alert feed message.",
-    );
-    return allAlerts;
-  }
-
-  logger.log(
-    `[Alerts Service] Processing ${message.entity.length} entities from feed...`,
-  );
-
-  for (const entity of message.entity) {
-    const alert = entity.alert;
-    if (alert) {
-      try {
-        const affectedSystemRouteIds = new Set<string>(); // Use Set for automatic deduplication
-
-        if (alert.informed_entity) {
-          for (const informed of alert.informed_entity) {
-            const agencyId = informed.agency_id; // Get agency ID first
-
-            // --- Skip Bus Routes (MTABC) ---
-            if (agencyId === "MTABC") {
-              // logger.warn(`[Alerts Service] Alert ${entity.id}: Skipping informed_entity with agency_id "MTABC".`);
-              continue; // Skip the rest of the loop for this informed_entity
-            }
-
-            // --- Disambiguation Logic (for non-skipped entities) ---
-            let potentialSystemRouteId: string | null = null;
-            const routeId = informed.route_id; // Raw route_id ("1")
-
-            // We only care about entities that specify a route
-            if (routeId) {
-              if (agencyId && AGENCY_ID_TO_SYSTEM[agencyId]) {
-                // We have a known agency and a route ID
-                const systemPrefix = AGENCY_ID_TO_SYSTEM[agencyId];
-                potentialSystemRouteId = `${systemPrefix}-${routeId}`;
-                // logger.warn(`[Alerts Service] Alert ${entity.id}: Mapped agency "${agencyId}" + route "${routeId}" to "${potentialSystemRouteId}"`);
-              } else {
-                // Fallback/Warning: No agency_id or unknown agency_id for a route
-                // If no agency context, we CANNOT reliably disambiguate.
-                logger.warn(
-                  `[Alerts Service] Alert ${entity.id}: Cannot reliably map route_id "${routeId}" to a system. Missing or unknown agency_id "${agencyId}". Skipping this route entity.`,
-                );
-                potentialSystemRouteId = null; // Ensure it's not added
-              }
-
-              // Validate constructed ID against static data AND add to Set
-              if (
-                potentialSystemRouteId &&
-                staticRoutes.has(potentialSystemRouteId)
-              ) {
-                affectedSystemRouteIds.add(potentialSystemRouteId);
-              } else if (potentialSystemRouteId) {
-                // Log if we constructed an ID (meaning it wasn't MTABC and had agency info)
-                // but it's not found in our static data map. This might indicate
-                // stale static data or a new route ID in the feed.
-                logger.warn(
-                  `[Alerts Service] Alert ${entity.id}: Constructed System-RouteId "${potentialSystemRouteId}" but it's not found in staticRoutes map. Skipping.`,
-                );
-              }
-            }
-            // TODO: Handle informed.stop_id if needed (map stop to routes?)
-          } // end informed_entity loop
-        } // end if(informed_entity)
-
-        const getText = (field: any): string | undefined =>
-          field?.translation?.[0]?.text;
-        const title = getText(alert.header_text) || "Untitled Alert";
-        const description =
-          getText(alert.description_text) || "No description.";
-        const url = getText(alert.url);
-        const startDateEpoch = alert.active_period?.[0]?.start;
-        const endDateEpoch = alert.active_period?.[0]?.end;
-
-        // Create the full alert object
-        allAlerts.push({
-          id: entity.id,
-          agency_id: entity.agency_id,
-          title: title,
-          description: description,
-          affectedLines: Array.from(affectedSystemRouteIds).sort(), // Store processed short names
-          startDate: startDateEpoch
-            ? new Date(Number(startDateEpoch) * 1000)
-            : undefined,
-          endDate: endDateEpoch
-            ? new Date(Number(endDateEpoch) * 1000)
-            : undefined,
-          url: url,
-        });
-      } catch (alertError) {
-        logger.error(
-          `[Alerts Service] Error processing alert entity ${entity.id}:`,
-          alertError,
-        );
-      }
-    } // end if(alert)
-  } // end for loop
-  logger.log(
-    `[Alerts Service] Parsed ${allAlerts.length} total alerts from feed.`,
-  );
-
-  // --- Apply Filters ---
-  let filteredAlerts = allAlerts;
-
-  // 1. Filter by Active Period
-  if (filterActiveNow) {
-    const now = Date.now();
-    filteredAlerts = filteredAlerts.filter((alert) => {
-      const start = alert.startDate?.getTime();
-      const end = alert.endDate?.getTime();
-      // Include if: No start date OR start date is in the past/now
-      const started = !start || start <= now;
-      // Include if: No end date OR end date is in the future/now
-      const notEnded = !end || end >= now;
-      return started && notEnded;
-    });
-    logger.log(
-      `[Alerts Service] Filtered to ${filteredAlerts.length} active alerts.`,
-    );
-  }
-
-  // 2. Filter by Target Lines
-  if (targetLines && targetLines.length > 0) {
-    // Normalize targetLines from query param
-    // Ensure case matches how affectedLinesShortNames were stored
-    const targetLinesUpper = targetLines.map((l) => l.toUpperCase());
-
-    filteredAlerts = filteredAlerts.filter((alert) => {
-      // Check if ANY of the alert's affected lines match ANY of the target lines
-      return alert.affectedLines.some(
-        (alertLine) => targetLinesUpper.includes(alertLine.toUpperCase()), // Case-insensitive check
-      );
-    });
-    logger.log(
-      `[Alerts Service] Filtered to ${
-        filteredAlerts.length
-      } alerts affecting lines: [${targetLines.join(", ")}]`,
-    );
-  }
-  // --- End Apply Filters ---
-
-  // Sort the *filtered* results (e.g., by start date descending)
-  filteredAlerts.sort(
-    (a, b) => (b.startDate?.getTime() ?? 0) - (a.startDate?.getTime() ?? 0),
-  );
-
-  return filteredAlerts;
 }

@@ -1,8 +1,11 @@
 // src/utils/protobufLoader.ts
+import { LoggerService } from "./logger";
 import * as protobuf from "protobufjs";
 import * as path from "path";
 import * as dotenv from "dotenv";
-// import * as fs from 'fs'; // Only needed for custom resolver example
+
+const logger =
+  LoggerService.getInstance().createServiceLogger("Protobuf Loader");
 
 dotenv.config();
 
@@ -28,13 +31,13 @@ export async function loadProtobufDefinitions(): Promise<protobuf.Type> {
   }
 
   const absoluteProtoPaths = protoFiles.map((p) => path.resolve(p));
-  console.log(`Resolved absolute paths for proto files:`, absoluteProtoPaths);
+  logger.log(`Resolved absolute paths for proto files:`, absoluteProtoPaths);
 
   try {
-    console.log(
+    logger.log(
       `Attempting to load protobuf definitions from: ${absoluteProtoPaths.join(", ")}`,
     );
-    console.log(`Setting include path for protobuf imports: ${includeBaseDir}`); // Log the base dir
+    logger.log(`Setting include path for protobuf imports: ${includeBaseDir}`); // Log the base dir
 
     // Create a new Root instance
     root = new protobuf.Root();
@@ -57,13 +60,13 @@ export async function loadProtobufDefinitions(): Promise<protobuf.Type> {
       throw new Error("FeedMessage type not found after loading proto files.");
     }
 
-    console.log(
+    logger.log(
       "Protobuf definitions loaded successfully. FeedMessage type resolved.",
     );
     return feedMessageDefinition;
   } catch (error) {
     // Log the specific error to understand what failed (e.g., file not found, parsing error)
-    console.error(
+    logger.error(
       `Failed during protobuf load. Check paths and imports. Error details:`,
       error,
     );

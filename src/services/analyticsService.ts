@@ -31,17 +31,15 @@ const dataDir = path.join(__dirname, "..", "..", "data");
 const dbPath = path.join(dataDir, "analytics.sqlite");
 
 // Ensure the data directory exists
-try {
-  if (!fs.existsSync(dataDir)) {
+if (!fs.existsSync(dataDir)) {
+  try {
     fs.mkdirSync(dataDir, { recursive: true });
     logger.info(`[Analytics Service] Created data directory: ${dataDir}`);
+  } catch (error) {
+    const msg = `[Analytics Service] Failed to create data directory: ${dataDir}`;
+    logger.error(msg, { error });
+    throw new Error(msg);
   }
-} catch (error) {
-  logger.error(
-    `[Analytics Service] Failed to create data directory: ${dataDir}`,
-    { error },
-  );
-  // Depending on requirements, you might want to throw or exit if the dir can't be created
 }
 
 class AnalyticsService {
@@ -57,7 +55,7 @@ class AnalyticsService {
     );
     try {
       // Connect to the database (creates the file if it doesn't exist)
-      this.db = new Database(databasePath); // verbose: console.log }); // Add verbose for debugging SQL
+      this.db = new Database(databasePath);
 
       // Ensure the table exists (using IF NOT EXISTS is idempotent)
       this.db.exec(`
@@ -157,7 +155,9 @@ class AnalyticsService {
     try {
       // Execute with the station name included
       this.trackStationStmt.run(system, stationId, stationName);
-      // logger.debug(`[Analytics Service] Tracked lookup: ${system}-${stationId} (${stationName})`);
+      logger.debug(
+        `[Analytics Service] Tracked lookup: ${system}-${stationId} (${stationName})`,
+      );
     } catch (error) {
       logger.error(
         `[Analytics Service] Failed to track lookup for ${system}-${stationId}`,
@@ -168,7 +168,6 @@ class AnalyticsService {
 
   public getAnalyticsData(): StationAnalyticsData {
     try {
-      // Fetch rows including the stored name
       const rows = this.getAllStationsStmt.all() as StationAnalyticsRow[];
       const analyticsData: StationAnalyticsData = {};
 
@@ -176,10 +175,9 @@ class AnalyticsService {
         if (!analyticsData[row.system]) {
           analyticsData[row.system] = {};
         }
-        // Use the name directly from the row
         analyticsData[row.system][row.station_id] = {
           count: row.count,
-          name: row.station_name, // Name comes from DB now
+          name: row.station_name,
         };
       }
       return analyticsData;
@@ -188,7 +186,7 @@ class AnalyticsService {
         "[Analytics Service] Failed to retrieve station analytics data from DB",
         { error },
       );
-      return {}; // Return empty on error
+      return {};
     }
   }
 
@@ -217,7 +215,9 @@ class AnalyticsService {
       const dayTimestamp = Math.floor(startOfDayUTC.getTime() / 1000); // Unix Epoch seconds
 
       this.trackApiHitStmt.run(dayTimestamp, endpoint); // Use daily timestamp
-      // logger.debug(`[Analytics Service] Tracked API hit for endpoint: ${endpoint} on day ${dayTimestamp}`);
+      logger.debug(
+        `[Analytics Service] Tracked API hit for endpoint: ${endpoint} on day ${dayTimestamp}`,
+      );
     } catch (error) {
       logger.error(
         `[Analytics Service] Failed to track API hit for endpoint: ${endpoint}`,
@@ -235,7 +235,7 @@ class AnalyticsService {
         "[Analytics Service] Failed to retrieve API usage data from DB",
         { error },
       );
-      return []; // Return empty array on error
+      return [];
     }
   }
 

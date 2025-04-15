@@ -23,7 +23,7 @@ export function setCache<T>(
   value: T,
   ttl: number = ttlSeconds,
 ): boolean {
-  // logger.info(`Setting cache for key: ${key} with TTL: ${ttl}`);
+  logger.info(`Setting cache for key: ${key} with TTL: ${ttl}`);
   return cache.set(key, value, ttl);
 }
 

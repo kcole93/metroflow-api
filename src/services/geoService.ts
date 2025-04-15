@@ -115,7 +115,7 @@ export function getBoroughForCoordinates(
   return null;
 }
 
-// Optional: Function to check if data is ready
+//Function to check if data is ready
 export function isGeoDataReady(): boolean {
   return isDataLoaded;
 }

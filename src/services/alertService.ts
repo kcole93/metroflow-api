@@ -77,7 +77,7 @@ export async function getServiceAlerts(
 
             // --- Skip Bus Routes (MTABC) ---
             if (agencyId === "MTABC") {
-              // logger.warn(`[Alerts Service] Alert ${entity.id}: Skipping informed_entity with agency_id "MTABC".`);
+              // logger.debug(`[Alerts Service] Alert ${entity.id}: Skipping informed_entity with agency_id "MTABC".`);
               continue; // Skip the rest of the loop for this informed_entity
             }
 
@@ -91,7 +91,9 @@ export async function getServiceAlerts(
                 // We have a known agency and a route ID
                 const systemPrefix = AGENCY_ID_TO_SYSTEM[agencyId];
                 potentialSystemRouteId = `${systemPrefix}-${routeId}`;
-                // logger.warn(`[Alerts Service] Alert ${entity.id}: Mapped agency "${agencyId}" + route "${routeId}" to "${potentialSystemRouteId}"`);
+                logger.debug(
+                  `[Alerts Service] Alert ${entity.id}: Mapped agency "${agencyId}" + route "${routeId}" to "${potentialSystemRouteId}"`,
+                );
               } else {
                 // Fallback/Warning: No agency_id or unknown agency_id for a route
                 // If no agency context, we CANNOT reliably disambiguate.
@@ -116,7 +118,7 @@ export async function getServiceAlerts(
                 );
               }
             }
-            // TODO: Handle informed.stop_id if needed (map stop to routes?)
+            // TODO: Handle informed.stop_id (map stop to routes?)
           } // end informed_entity loop
         } // end if(informed_entity)
 
@@ -204,7 +206,6 @@ export async function getServiceAlerts(
   // 2. Filter by Target Lines
   if (targetLines && targetLines.length > 0) {
     // Normalize targetLines from query param
-    // Ensure case matches how affectedLinesShortNames were stored
     const targetLinesUpper = targetLines.map((l) => l.toUpperCase());
 
     filteredIntermediateAlerts = filteredIntermediateAlerts.filter((alert) => {

@@ -5,9 +5,7 @@ import { logger } from "../utils/logger";
 
 const router = Router();
 
-// *** Define ONLY the system values ALLOWED as query parameters ***
 const ALLOWED_QUERY_SYSTEMS = ["LIRR", "SUBWAY", "MNR"] as const;
-// Create a type from these allowed values if needed for the service function signature
 type FilterableSystem = (typeof ALLOWED_QUERY_SYSTEMS)[number];
 
 // Error handler
@@ -32,7 +30,7 @@ const getStationsHandler: RequestHandler = async (req, res) => {
   const query = req.query.q as string | undefined;
   const systemQuery = req.query.system as string | undefined;
 
-  // Variable to hold the validated filter, typed correctly
+  // Variable to hold the validated filter
   let systemFilter: FilterableSystem | undefined = undefined;
 
   if (systemQuery) {
@@ -48,14 +46,13 @@ const getStationsHandler: RequestHandler = async (req, res) => {
       res.status(400).json({
         error: `Invalid system query parameter. Must be one of: ${ALLOWED_QUERY_SYSTEMS.join(
           ", ",
-        )}`, // Use the correct constant
+        )}`,
       });
       return;
     }
   }
 
   try {
-    // Ensure mtaService.getStations signature accepts FilterableSystem | undefined
     const stations = await mtaService.getStations(query, systemFilter);
     res.json(stations);
   } catch (err) {
@@ -65,13 +62,10 @@ const getStationsHandler: RequestHandler = async (req, res) => {
 
 router.get("/stations", getStationsHandler);
 
-// --- Explicitly type the handler ---
 const getDeparturesHandler: RequestHandler = async (req, res) => {
   const stationId = req.params.stationId;
   if (!stationId) {
-    // Send the response...
     res.status(400).json({ error: "Station ID parameter is required." });
-    // ...then return void (implicitly) to satisfy RequestHandler type
     return;
   }
 
@@ -120,10 +114,9 @@ const getAlertsHandler: RequestHandler = async (req, res) => {
   const linesQuery = req.query.lines as string | undefined;
   let targetLines: string[] | undefined = undefined;
   if (linesQuery) {
-    // Split, trim whitespace, remove empty strings, maybe normalize case
     targetLines = linesQuery
       .split(",")
-      .map((line) => line.trim().toUpperCase()) // Normalize to uppercase? Match your static data case.
+      .map((line) => line.trim().toUpperCase())
       .filter((line) => line.length > 0);
     logger.info(
       `[Alerts Route] Filtering for lines: [${targetLines.join(", ")}]`,

@@ -6,10 +6,10 @@ import { Logger } from "./logger";
 
 export async function parseCsvFile<T extends object>(
   filePath: string,
-  logger: Logger, // Use the imported Logger type
+  logger: Logger,
 ): Promise<T[]> {
   try {
-    logger.info(`Reading CSV file: ${path.basename(filePath)}`); // Use info or debug
+    logger.info(`Reading CSV file: ${path.basename(filePath)}`);
     const fileContent: string = await fs.readFile(filePath, "utf8");
 
     // Explicitly type the result from Papa.parse

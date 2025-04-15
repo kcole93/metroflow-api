@@ -1,6 +1,6 @@
 // scripts/run-static-refresh.ts
 import { runStaticDataRefreshTask } from "../src/tasks/refreshStaticData";
-import { logger } from "../src/utils/logger"; // Optional: for logging start/end
+import { logger } from "../src/utils/logger";
 
 async function runTask() {
   logger.info("Starting manual static data refresh...");

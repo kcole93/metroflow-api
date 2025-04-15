@@ -14,7 +14,7 @@ router.get("/api/health", (req, res) => {
   res.status(200).json({ status: "OK", timestamp: new Date().toISOString() });
 });
 
-// Analytics Endpoint ---
+// Analytics Endpoints ---
 // --- Station Analytics Endpoint ---
 router.get("/api/analytics/stations", (req, res) => {
   // Renamed for clarity

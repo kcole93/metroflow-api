@@ -19,8 +19,7 @@ dotenv.config();
 // Initialize with empty state or types asserting it might be null initially
 let currentStaticData: StaticData | null = null;
 let staticData: StaticData | null = null;
-const BASE_DATA_PATH =
-  process.env.STATIC_DATA_PATH || "./src/assets/gtfs-static";
+const BASE_DATA_PATH = path.join(__dirname, "..", "assets", "gtfs-static");
 
 // Base interface for raw stop time data from CSV
 interface StopTimeBase {

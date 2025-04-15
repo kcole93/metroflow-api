@@ -9,8 +9,14 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 // --- Configuration ---
-const GEOJSON_PATH =
-  process.env.BOROUGH_GEOJSON_PATH || "src/assets/geodata/nyc-boroughs.geojson";
+const GEOJSON_PATH = path.join(
+  __dirname,
+  "..",
+  "assets",
+  "geodata",
+  "nyc-boroughs.geojson",
+);
+
 // Property name in GeoJSON features containing the borough name
 const BOROUGH_NAME_PROPERTY = process.env.BOROUGH_NAME_PROPERTY || "BoroName";
 

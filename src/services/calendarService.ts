@@ -8,8 +8,7 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 // --- Configuration ---
-const BASE_DATA_PATH =
-  process.env.STATIC_DATA_PATH || "./src/assets/gtfs-static";
+const BASE_DATA_PATH = path.join(__dirname, "..", "assets", "gtfs-static");
 const LIRR_PATH = path.join(BASE_DATA_PATH, "LIRR");
 const SUBWAY_PATH = path.join(BASE_DATA_PATH, "NYCT");
 const MNR_PATH = path.join(BASE_DATA_PATH, "MNR");

@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "rimraf ./dist && tsc",
+    "build": "rimraf ./dist && tsc -p tsconfig.json",
     "start": "LOG_LEVEL=info node dist/server.js",
     "dev": "LOG_LEVEL=debug nodemon src/server.ts",
     "db:reset:analytics": "echo 'Deleting analytics database file (data/analytics.sqlite)...' && rimraf data/analytics.sqlite && echo 'Analytics database deleted. It will be recreated on next server start.'",
@@ -30,6 +30,7 @@
     "node-fetch": "^3.3.2",
     "papaparse": "^5.5.2",
     "protobufjs": "^7.4.0",
+    "rimraf": "^6.0.1",
     "turndown": "^7.2.0",
     "winston": "^3.17.0"
   },
@@ -52,7 +53,6 @@
     "@types/papaparse": "^5.3.15",
     "@types/turndown": "^5.0.5",
     "nodemon": "^3.1.9",
-    "rimraf": "^6.0.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   }

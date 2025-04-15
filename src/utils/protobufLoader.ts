@@ -2,56 +2,65 @@
 import { logger } from "./logger";
 import * as protobuf from "protobufjs";
 import * as path from "path";
-import * as dotenv from "dotenv";
-
-dotenv.config();
 
 let root: protobuf.Root | null = null;
 let feedMessageDefinition: protobuf.Type | null = null;
 
-// Paths to the actual files in their new location
-const protoFiles = [
-  process.env.PROTO_BASE_PATH ||
-    "src/assets/com/google/transit/realtime/gtfs-realtime.proto",
-  process.env.PROTO_NYCT_PATH ||
-    "src/assets/com/google/transit/realtime/gtfs-realtime-NYCT.proto",
-  process.env.PROTO_MTARR_PATH ||
-    "src/assets/com/google/transit/realtime/gtfs-realtime-MTARR.proto",
-];
+// --- Calculate paths relative to the compiled JS file location ---
+// __dirname in the compiled /app/dist/utils/protobufLoader.js is /app/dist/utils
+// We need the /app/dist/assets directory
+const assetsDir = path.resolve(__dirname, "..", "assets");
 
-// The directory containing the start of the import path ('com')
-const includeBaseDir = path.resolve("src/assets"); // Points to the directory holding 'com'
+// The base directory from which proto imports (like 'com/...') should be resolved
+// This should also be the assets directory copied into dist
+const protoIncludeBaseDir = assetsDir;
+
+// Full paths to the main .proto files to load initially
+const protoFilesToLoad = [
+  path.join(
+    protoIncludeBaseDir,
+    "com/google/transit/realtime/gtfs-realtime.proto",
+  ),
+  path.join(
+    protoIncludeBaseDir,
+    "com/google/transit/realtime/gtfs-realtime-NYCT.proto",
+  ),
+  path.join(
+    protoIncludeBaseDir,
+    "com/google/transit/realtime/gtfs-realtime-MTARR.proto",
+  ),
+];
 
 export async function loadProtobufDefinitions(): Promise<protobuf.Type> {
   if (feedMessageDefinition) {
     return feedMessageDefinition;
   }
 
-  const absoluteProtoPaths = protoFiles.map((p) => path.resolve(p));
-  logger.debug(
-    `Resolved absolute paths for proto files: ${absoluteProtoPaths.join(", ")}`,
+  // Log the calculated paths for verification
+  logger.info(
+    `Attempting to load protobuf definitions from: ${protoFilesToLoad.join(", ")}`,
   );
+  logger.debug(`Setting protobuf include path base to: ${protoIncludeBaseDir}`);
 
   try {
-    logger.info(
-      `Attempting to load protobuf definitions from: ${absoluteProtoPaths.join(", ")}`,
-    );
-    logger.debug(
-      `Setting include path for protobuf imports: ${includeBaseDir}`,
-    ); // Log the base dir
-
     // Create a new Root instance
     root = new protobuf.Root();
 
-    // --- Set the search path for imports ---
-    // This tells protobufjs: "When you see an import like 'com/...',
-    // look for a 'com' directory inside this path."
-    root.resolvePath = (origin: string, target: string) => {
-      return path.resolve(includeBaseDir, target);
+    // --- Set the search path for imports within .proto files ---
+    // When a .proto file has `import "com/google/other.proto";`,
+    // protobufjs will call this function. We resolve the target path
+    // relative to our include base directory.
+    root.resolvePath = (origin: string, target: string): string | null => {
+      const resolved = path.resolve(protoIncludeBaseDir, target);
+      logger.debug(
+        `Resolving proto import: origin='${origin}', target='${target}' -> resolved='${resolved}'`,
+      );
+      return resolved;
     };
 
-    // Load the files specified by absolute paths
-    await root.load(absoluteProtoPaths, { keepCase: true });
+    // Load the main files using their absolute paths
+    // protobufjs will use the resolvePath function above if these files contain imports
+    await root.load(protoFilesToLoad, { keepCase: true });
 
     // Lookup the main FeedMessage type
     feedMessageDefinition = root.lookupType("transit_realtime.FeedMessage");
@@ -64,11 +73,15 @@ export async function loadProtobufDefinitions(): Promise<protobuf.Type> {
       "Protobuf definitions loaded successfully. FeedMessage type resolved.",
     );
     return feedMessageDefinition;
-  } catch (error) {
-    // Log the specific error to understand what failed (e.g., file not found, parsing error)
+  } catch (error: any) {
     logger.error(
       `Failed during protobuf load. Check paths and imports. Error details:`,
-      error,
+      {
+        message: error.message,
+        code: error.code,
+        path: error.path,
+        stack: error.stack?.substring(0, 500),
+      },
     );
     throw new Error("Could not load GTFS-Realtime protobuf definitions.");
   }

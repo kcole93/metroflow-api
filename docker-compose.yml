@@ -1,0 +1,31 @@
+# docker-compose.yml
+
+services:
+  metroflow-api:
+    build: . # Build the image from the Dockerfile in the current directory
+    container_name: metroflow-api
+    restart: unless-stopped # Automatically restart if it stops, unless manually stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - LOG_LEVEL=info
+      - GTFS_STATIC_URL_NYCT=${GTFS_STATIC_URL_NYCT} # Reads from .env file on the HOST running docker-compose
+      - GTFS_STATIC_URL_LIRR=${GTFS_STATIC_URL_LIRR}
+      - GTFS_STATIC_URL_MNR=${GTFS_STATIC_URL_MNR}
+      - STATIC_REFRESH_SCHEDULE=${STATIC_REFRESH_SCHEDULE}
+      - STATIC_REFRESH_TIMEZONE=${STATIC_REFRESH_TIMEZONE}
+    volumes:
+      # Mount host directories/named volumes into the container
+      - metroflow-data:/app/data # Mount named volume 'metroflow-data' to /app/data in container
+      - metroflow-logs:/app/logs # Mount named volume 'metroflow-logs' to /app/logs
+      # ** IMPORTANT for static data refresh **
+      # Mount the host's static data directory into the expected location INSIDE src/assets
+      # because the running code expects it there relative to __dirname after build
+      - ./src/assets/gtfs-static:/app/dist/assets/gtfs-static
+
+# Define the named volumes
+volumes:
+  metroflow-data:
+  metroflow-logs:

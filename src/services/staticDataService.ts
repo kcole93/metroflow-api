@@ -16,6 +16,8 @@ import { ROUTE_ID_TO_FEED_MAP } from "../services/mtaService";
 
 dotenv.config();
 
+// Initialize with empty state or types asserting it might be null initially
+let currentStaticData: StaticData | null = null;
 let staticData: StaticData | null = null;
 const BASE_DATA_PATH =
   process.env.STATIC_DATA_PATH || "./src/assets/gtfs-static";
@@ -30,12 +32,114 @@ interface StopTimeBase {
   track?: string;
 }
 
-// --- Main Static Data Loading Function ---
-export async function loadStaticData(): Promise<StaticData> {
-  if (staticData) {
-    logger.info("Returning cached static data.");
-    return staticData;
+function addRouteToMap(
+  r: any,
+  system: SystemType,
+  map: Map<string, StaticRouteInfo>, // Use the passed map
+) {
+  const routeId = r.route_id?.trim();
+  if (!routeId) return;
+  const uniqueKey = `${system}-${routeId}`;
+  map.set(uniqueKey, {
+    // Use the passed 'map' variable
+    route_id: routeId,
+    agency_id: r.agency_id?.trim() || undefined,
+    route_short_name: r.route_short_name?.trim() || "",
+    route_long_name: r.route_long_name?.trim() || "",
+    route_type: r.route_type ? parseInt(r.route_type, 10) : undefined,
+    route_color: r.route_color,
+    route_text_color: r.route_text_color?.trim() || null,
+    system: system,
+  });
+}
+
+function addTripToMap(
+  t: any,
+  system: SystemType,
+  map: Map<string, StaticTripInfo>, // Use the passed map
+  destinations: Map<string, string>,
+) {
+  const tripId = t.trip_id?.trim();
+  const routeId = t.route_id?.trim();
+  if (!tripId || !routeId) return;
+  let directionIdNum: number | null = null;
+  const dirIdStr = t.direction_id;
+  if (dirIdStr != null && dirIdStr !== "") {
+    const p = parseInt(dirIdStr, 10);
+    if (!isNaN(p)) directionIdNum = p;
   }
+  const destStopId = destinations.get(tripId) || null;
+  map.set(tripId, {
+    // Use the passed 'map' variable
+    trip_id: tripId,
+    route_id: routeId,
+    service_id: t.service_id?.trim() || "",
+    trip_headsign: t.trip_headsign?.trim() || undefined,
+    trip_short_name: t.trip_short_name?.trim() || undefined,
+    peak_offpeak: t.peak_offpeak?.trim() || null,
+    direction_id: directionIdNum,
+    block_id: t.block_id?.trim() || undefined,
+    shape_id: t.shape_id?.trim() || undefined,
+    system: system,
+    destinationStopId: destStopId,
+  });
+}
+
+function processStop(
+  rawStop: any,
+  system: SystemType,
+  map: Map<string, StaticStopInfo>, // Use the passed map
+) {
+  const originalStopId = rawStop.stop_id?.trim();
+  if (!originalStopId) return;
+  const uniqueStopKey = `${system}-${originalStopId}`;
+  const latitude =
+    typeof rawStop.stop_lat === "string"
+      ? parseFloat(rawStop.stop_lat)
+      : rawStop.stop_lat;
+  const longitude =
+    typeof rawStop.stop_lon === "string"
+      ? parseFloat(rawStop.stop_lon)
+      : rawStop.stop_lon;
+  let locationTypeNum: number | null = null;
+  const locStr = rawStop.location_type;
+  if (typeof locStr === "string" && locStr.trim() !== "") {
+    const p = parseInt(locStr, 10);
+    if (!isNaN(p)) locationTypeNum = p;
+  }
+  const parentStationFileId = rawStop.parent_station?.trim() || null;
+  const uniqueParentKey = parentStationFileId
+    ? `${system}-${parentStationFileId}`
+    : null;
+  const borough = getBoroughForCoordinates(
+    !isNaN(latitude) ? latitude : undefined,
+    !isNaN(longitude) ? longitude : undefined,
+  );
+
+  // Check the passed 'map' before setting
+  if (!map.has(uniqueStopKey)) {
+    map.set(uniqueStopKey, {
+      // Use the passed 'map' variable
+      id: uniqueStopKey,
+      originalStopId: originalStopId,
+      name: rawStop.stop_name || "Unnamed Stop",
+      latitude: !isNaN(latitude) ? latitude : undefined,
+      longitude: !isNaN(longitude) ? longitude : undefined,
+      parentStationId: uniqueParentKey,
+      locationType: locationTypeNum,
+      childStopIds: new Set<string>(),
+      servedByRouteIds: new Set<string>(),
+      feedUrls: new Set<string>(),
+      system: system,
+      borough: borough,
+    });
+  }
+}
+
+// --- Main Static Data Loading Function ---
+export async function loadStaticData(): Promise<void> {
+  logger.info("Starting to load/reload static GTFS data...");
+  const startTime = Date.now();
 
   // Define system paths to locate static data files
   const systems = [
@@ -44,7 +148,14 @@ export async function loadStaticData(): Promise<StaticData> {
     { name: "MNR" as SystemType, path: path.join(BASE_DATA_PATH, "MNR") },
   ];
 
-  logger.info("Loading static GTFS data...");
+  // --- Load data into temporary vars for the load attempt
+  const tempLoadedRoutes = new Map<string, StaticRouteInfo>();
+  const tempLoadedStops = new Map<string, StaticStopInfo>();
+  const tempLoadedTrips = new Map<string, StaticTripInfo>();
+  const tempLoadedStopTimeLookup = new Map<
+    string,
+    Map<string, StaticStopTimeInfo>
+  >();
 
   try {
     // --- 1. Load All Raw Files ---
@@ -78,28 +189,15 @@ export async function loadStaticData(): Promise<StaticData> {
     const allTripsRaw = [...lirrTripsRaw, ...subwayTripsRaw, ...mnrTripsRaw];
     logger.info("Phase 1 finished.");
 
-    // --- 2. Build tempRoutes Map (Key: SYSTEM-ROUTEID) ---
+    // --- 2. Build tempRoutes Map (Key: SYSTEM-ROUTEID), populating tempLoadedRoutes map ---
     logger.info("Phase 2: Building routes map...");
-    const tempRoutes = new Map<string, StaticRouteInfo>();
-    const addRouteToMap = (r: any, system: SystemType) => {
-      const routeId = r.route_id?.trim();
-      if (!routeId) return;
-      const uniqueKey = `${system}-${routeId}`;
-      tempRoutes.set(uniqueKey, {
-        route_id: routeId,
-        agency_id: r.agency_id?.trim() || undefined,
-        route_short_name: r.route_short_name?.trim() || "",
-        route_long_name: r.route_long_name?.trim() || "",
-        route_type: r.route_type ? parseInt(r.route_type, 10) : undefined,
-        route_color: r.route_color,
-        route_text_color: r.route_text_color?.trim() || null,
-        system: system, // Assign system so that we can disambiguate later
-      });
-    };
-    lirrRoutesRaw.forEach((r) => addRouteToMap(r, "LIRR"));
-    subwayRoutesRaw.forEach((r) => addRouteToMap(r, "SUBWAY"));
-    mnrRoutesRaw.forEach((r) => addRouteToMap(r, "MNR"));
-    logger.info(`Phase 2 finished. Routes map size: ${tempRoutes.size}`);
+
+    lirrRoutesRaw.forEach((r) => addRouteToMap(r, "LIRR", tempLoadedRoutes));
+    subwayRoutesRaw.forEach((r) =>
+      addRouteToMap(r, "SUBWAY", tempLoadedRoutes),
+    );
+    mnrRoutesRaw.forEach((r) => addRouteToMap(r, "MNR", tempLoadedRoutes));
+    logger.info(`Phase 2 finished. Routes map size: ${tempLoadedRoutes.size}`);
 
     // --- 3. Process stop_times to find Trip Destinations (Key: raw trip_id) ---
     logger.info(
@@ -129,103 +227,38 @@ export async function loadStaticData(): Promise<StaticData> {
 
     // --- 4. Build FINAL tempTrips map (Key: raw trip_id) ---
     logger.info("Pass 4: Building final tempTrips map...");
-    const tempTrips = new Map<string, StaticTripInfo>();
-    const addTripToMap = (t: any, system: SystemType) => {
-      const tripId = t.trip_id?.trim();
-      const routeId = t.route_id?.trim();
-      if (!tripId || !routeId) return;
-      let directionIdNum: number | null = null;
-      const dirIdStr = t.direction_id;
-      if (dirIdStr != null && dirIdStr !== "") {
-        const p = parseInt(dirIdStr, 10);
-        if (!isNaN(p)) directionIdNum = p;
-      }
-      const destStopId = tripDestinations.get(tripId) || null; // Lookup destination ID
-      tempTrips.set(tripId, {
-        // Explicitly list fields from StaticTripInfo type
-        trip_id: tripId,
-        route_id: routeId,
-        service_id: t.service_id?.trim() || "",
-        trip_headsign: t.trip_headsign?.trim() || undefined,
-        trip_short_name: t.trip_short_name?.trim() || undefined,
-        peak_offpeak: t.peak_offpeak?.trim() || null,
-        direction_id: directionIdNum,
-        block_id: t.block_id?.trim() || undefined,
-        shape_id: t.shape_id?.trim() || undefined,
-        system: system,
-        destinationStopId: destStopId, // Store destination ID
-      });
-    };
-    lirrTripsRaw.forEach((t) => addTripToMap(t, "LIRR"));
-    subwayTripsRaw.forEach((t) => addTripToMap(t, "SUBWAY"));
-    mnrTripsRaw.forEach((t) => addTripToMap(t, "MNR"));
-    logger.info(`Pass 4 finished. Final tempTrips map size: ${tempTrips.size}`);
+    lirrTripsRaw.forEach((t) =>
+      addTripToMap(t, "LIRR", tempLoadedTrips, tripDestinations),
+    );
+    subwayTripsRaw.forEach((t) =>
+      addTripToMap(t, "SUBWAY", tempLoadedTrips, tripDestinations),
+    );
+    mnrTripsRaw.forEach((t) =>
+      addTripToMap(t, "MNR", tempLoadedTrips, tripDestinations),
+    );
+    logger.info(
+      `Pass 4 finished. Final tempTrips map size: ${tempLoadedTrips.size}`,
+    );
 
     // --- 5. Enrich static data ---
     logger.info(
       "Pass 5: Processing raw stops into enriched map + geofencing...",
     );
-    const enrichedStops = new Map<string, StaticStopInfo>();
     let stopsGeofencedCount = 0;
-    const processStop = (rawStop: any, system: SystemType) => {
-      const originalStopId = rawStop.stop_id?.trim();
-      if (!originalStopId) return;
-      const uniqueStopKey = `${system}-${originalStopId}`;
-      const latitude =
-        typeof rawStop.stop_lat === "string"
-          ? parseFloat(rawStop.stop_lat)
-          : rawStop.stop_lat;
-      const longitude =
-        typeof rawStop.stop_lon === "string"
-          ? parseFloat(rawStop.stop_lon)
-          : rawStop.stop_lon;
-      let locationTypeNum: number | null = null;
-      const locStr = rawStop.location_type;
-      if (typeof locStr === "string" && locStr.trim() !== "") {
-        const p = parseInt(locStr, 10);
-        if (!isNaN(p)) locationTypeNum = p;
-      }
-      const parentStationFileId = rawStop.parent_station?.trim() || null;
-      const uniqueParentKey = parentStationFileId
-        ? `${system}-${parentStationFileId}`
-        : null;
-      const borough = getBoroughForCoordinates(
-        !isNaN(latitude) ? latitude : undefined,
-        !isNaN(longitude) ? longitude : undefined,
-      );
-      if (borough) stopsGeofencedCount++;
-
-      if (!enrichedStops.has(uniqueStopKey)) {
-        enrichedStops.set(uniqueStopKey, {
-          id: uniqueStopKey,
-          originalStopId: originalStopId,
-          name: rawStop.stop_name || "Unnamed Stop",
-          latitude: !isNaN(latitude) ? latitude : undefined,
-          longitude: !isNaN(longitude) ? longitude : undefined,
-          parentStationId: uniqueParentKey,
-          locationType: locationTypeNum,
-          childStopIds: new Set<string>(),
-          servedByRouteIds: new Set<string>(),
-          feedUrls: new Set<string>(),
-          system: system,
-          borough: borough,
-        });
-      }
-    };
-    lirrStopsRaw.forEach((s) => processStop(s, "LIRR"));
-    subwayStopsRaw.forEach((s) => processStop(s, "SUBWAY"));
-    mnrStopsRaw.forEach((s) => processStop(s, "MNR"));
+    lirrStopsRaw.forEach((s) => processStop(s, "LIRR", tempLoadedStops));
+    subwayStopsRaw.forEach((s) => processStop(s, "SUBWAY", tempLoadedStops));
+    mnrStopsRaw.forEach((s) => processStop(s, "MNR", tempLoadedStops));
     logger.info(
-      `Pass 5 finished. enrichedStops size: ${enrichedStops.size}. Geofenced: ${stopsGeofencedCount}`,
+      `Pass 5 finished. enrichedStops size: ${tempLoadedStops.size}. Geofenced: ${stopsGeofencedCount}`,
     );
 
     // --- 6. Link children to parents (using unique keys) ---
     logger.info("Pass 6: Linking child stops to parent stations...");
     let linkedChildrenCount = 0;
-    for (const [childKey, stopInfo] of enrichedStops.entries()) {
+    for (const [childKey, stopInfo] of tempLoadedStops.entries()) {
       if (stopInfo.parentStationId) {
         // parentStationId is unique key "SYSTEM-ID"
-        const parentStopInfo = enrichedStops.get(stopInfo.parentStationId);
+        const parentStopInfo = tempLoadedStops.get(stopInfo.parentStationId);
         if (parentStopInfo) {
           parentStopInfo.childStopIds.add(stopInfo.originalStopId); // Add ORIGINAL child ID
           linkedChildrenCount++;
@@ -236,7 +269,6 @@ export async function loadStaticData(): Promise<StaticData> {
 
     // --- 7. Build StopTime Lookup Map (Key: original_stop_id -> trip_id -> info) ---
     logger.info("Pass 7: Building stopTimeLookup map...");
-    const stopTimeLookup = new Map<string, Map<string, StaticStopTimeInfo>>();
     for (const st of allStopTimesRaw) {
       const stopId = st.stop_id?.trim();
       const tripId = st.trip_id?.trim(); // Use raw tripId from stop_times
@@ -245,10 +277,13 @@ export async function loadStaticData(): Promise<StaticData> {
       const stopSequence = parseInt(stopSequenceStr, 10);
       if (isNaN(stopSequence)) continue;
 
-      if (!stopTimeLookup.has(stopId)) {
-        stopTimeLookup.set(stopId, new Map<string, StaticStopTimeInfo>());
+      if (!tempLoadedStopTimeLookup.has(stopId)) {
+        tempLoadedStopTimeLookup.set(
+          stopId,
+          new Map<string, StaticStopTimeInfo>(),
+        );
       }
-      stopTimeLookup.get(stopId)?.set(tripId, {
+      tempLoadedStopTimeLookup.get(stopId)?.set(tripId, {
         scheduledArrivalTime: st.arrival_time?.trim() || null,
         scheduledDepartureTime: st.departure_time?.trim() || null,
         stopSequence: stopSequence,
@@ -256,7 +291,7 @@ export async function loadStaticData(): Promise<StaticData> {
       });
     }
     logger.info(
-      `Pass 7 finished. Built stopTimeLookup map for ${stopTimeLookup.size} stops.`,
+      `Pass 7 finished. Built stopTimeLookup map for ${tempLoadedStopTimeLookup.size} stops.`,
     );
 
     // --- 8. Process stop_times to link routes/feeds ---
@@ -266,17 +301,17 @@ export async function loadStaticData(): Promise<StaticData> {
       for (const st of stopTimes) {
         const stopTimeTripId = st.trip_id?.trim();
         if (!stopTimeTripId) continue;
-        const trip = tempTrips.get(stopTimeTripId); // Lookup trip by raw ID
+        const trip = tempLoadedTrips.get(stopTimeTripId); // Lookup trip by raw ID
         if (!trip?.route_id || !trip.system) continue; // Need system from trip
 
         const routeMapKey = `${trip.system}-${trip.route_id}`; // Use trip's system + route_id
-        const route = tempRoutes.get(routeMapKey);
+        const route = tempLoadedRoutes.get(routeMapKey);
         if (!route) continue; // Skip if route lookup fails
 
         const originalStopId = st.stop_id?.trim();
         if (!originalStopId) continue;
         const childStopKey = `${trip.system}-${originalStopId}`; // Use trip's system + ST stop_id
-        const childStopInfo = enrichedStops.get(childStopKey);
+        const childStopInfo = tempLoadedStops.get(childStopKey);
         if (!childStopInfo) continue;
 
         const routeId = route.route_id;
@@ -297,7 +332,7 @@ export async function loadStaticData(): Promise<StaticData> {
           }
           if (childStopInfo.parentStationId) {
             // parent ID is unique key
-            const parentStopInfo = enrichedStops.get(
+            const parentStopInfo = tempLoadedStops.get(
               childStopInfo.parentStationId,
             );
             if (parentStopInfo) {
@@ -323,21 +358,28 @@ export async function loadStaticData(): Promise<StaticData> {
     processStopTimesForFeeds(allStopTimesRaw); // Process combined list
     logger.info("Pass 8 finished.");
 
-    // Final staticData object
+    // --- *** ATOMIC UPDATE *** ---
+    // If ALL phases succeeded, overwrite the module-level variable
+    // with the newly processed data.
     staticData = {
-      stops: enrichedStops,
-      routes: tempRoutes,
-      trips: tempTrips, // Map keyed by raw trip_id
-      stopTimeLookup: stopTimeLookup,
+      routes: tempLoadedRoutes,
+      stops: tempLoadedStops,
+      trips: tempLoadedTrips,
+      stopTimeLookup: tempLoadedStopTimeLookup,
+      lastRefreshed: new Date(),
     };
-    logger.info(
-      `Static data loaded: ${enrichedStops.size} total stops processed.`,
-    );
-    return staticData;
+    // Ensure your StaticData type includes lastRefreshed: Date;
+
+    const duration = Date.now() - startTime;
+    logger.info(`
+      [Static Data] >>> Module variable 'staticData' ASSIGNED. Routes count: ${staticData.routes.size}, Stops count: ${staticData.stops.size}`);
+    // No return needed
   } catch (error) {
-    logger.error(`Fatal error loading static GTFS data: ${error}`);
-    staticData = null; // Ensure staticData is null on error
-    throw new Error("Could not load essential static GTFS data.");
+    logger.error(`Fatal error loading/reloading static GTFS data!`, { error });
+    // ** IMPORTANT: Do NOT update the module-level staticData variable if loading failed **
+    // The application will continue using the potentially stale but valid older data.
+    // Re-throw the error to signal failure to the caller (e.g., the refresh task or initial startup)
+    throw error;
   }
 }
 

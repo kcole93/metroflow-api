@@ -173,4 +173,5 @@ export interface StaticData {
   trips: Map<string, StaticTripInfo>;
   tripsBySchedule?: Map<string, StaticTripInfo>; // Keyed by schedule info
   stopTimeLookup: Map<string, Map<string, StaticStopTimeInfo>>;
+  lastRefreshed: Date;
 }

@@ -24,6 +24,12 @@ const AGENCY_ID_TO_SYSTEM: { [key: string]: string } = {
 // -- Initialize TurndownService
 const turndownService = new TurndownService();
 
+// Temporary internal type to hold raw HTML before final conversion
+interface IntermediateServiceAlert extends Omit<ServiceAlert, "description"> {
+  description: string; // Holds plain text fallback initially
+  rawHtmlDescription?: string | null;
+}
+
 // --- getServiceAlerts Function ---
 export async function getServiceAlerts(
   targetLines?: string[], // Expects ["SUBWAY-1", "LIRR-1"], etc.
@@ -43,6 +49,9 @@ export async function getServiceAlerts(
   const fetchedData = await fetchAndParseFeed(feedUrl, feedName);
   const message = fetchedData?.message;
 
+  // --- Use Intermediate Type for Initial Parsing ---
+  let intermediateAlerts: IntermediateServiceAlert[] = [];
+
   let allAlerts: ServiceAlert[] = [];
 
   if (!message?.entity?.length) {
@@ -58,7 +67,6 @@ export async function getServiceAlerts(
 
   for (const entity of message.entity) {
     const alert = entity.alert;
-    console.log(alert.description_text);
     if (alert) {
       try {
         const affectedSystemRouteIds = new Set<string>(); // Use Set for automatic deduplication
@@ -116,50 +124,28 @@ export async function getServiceAlerts(
           field?.translation?.[0]?.text;
         const title = getText(alert.header_text) || "Untitled Alert";
 
-        let description = "No description."; // Default fallback
-        const descriptionTranslations = alert.description_text?.translation;
+        // --- Retrieve Description Variants ---
+        let plainTextDescription = "No description.";
         let rawHtmlDescription: string | null = null;
+        const descriptionTranslations = alert.description_text?.translation;
 
         if (descriptionTranslations && Array.isArray(descriptionTranslations)) {
-          // Try to find the 'en-html' translation specifically
           const htmlTranslation = descriptionTranslations.find(
             (t: any) => t?.language === "en-html",
           );
+          const plainTranslation = descriptionTranslations.find(
+            (t: any) => t?.language === "en",
+          );
 
-          if (htmlTranslation && htmlTranslation.text) {
-            rawHtmlDescription = htmlTranslation.text;
-          } else if (
-            descriptionTranslations.length > 0 &&
-            descriptionTranslations[0].text
-          ) {
-            // Fallback: If no 'en-html', use the first translation's text
-            description = descriptionTranslations[0].text;
-            // Optional: Log if we fell back
-            logger.debug(
-              `[Alerts Service] Alert ${entity.id}: No 'en-html' description found. Using first available translation.`,
-            );
+          if (htmlTranslation?.text) {
+            rawHtmlDescription = htmlTranslation.text; // Store raw HTML
           }
-        }
-
-        // Convert HTML to Markdown if found
-        if (rawHtmlDescription) {
-          try {
-            description = turndownService.turndown(rawHtmlDescription);
-            description = description.trim();
-            logger.debug(
-              `[Alerts Service] Alert ${entity.id}: Converted HTML description to Markdown.`,
-            );
-          } catch (conversionError) {
-            logger.error(
-              `[Alerts Service] Alert ${entity.id}: Failed to convert description HTML to Markdown. Falling back to plain text if available.`,
-              { error: conversionError },
-            );
-            // Fallback strategy: Use plain text if possible, otherwise the default
-            const plainTranslation = descriptionTranslations?.find(
-              (t: any) => t?.language === "en",
-            );
-            description =
-              plainTranslation?.text || "Description conversion failed.";
+          if (plainTranslation?.text) {
+            plainTextDescription = plainTranslation.text; // Store plain text
+          } else if (rawHtmlDescription && !plainTranslation?.text) {
+            // If we only got HTML, use that as the initial description too
+            // It will be converted later if this alert survives filtering
+            plainTextDescription = rawHtmlDescription;
           }
         }
 
@@ -168,11 +154,12 @@ export async function getServiceAlerts(
         const endDateEpoch = alert.active_period?.[0]?.end;
 
         // Create the full alert object
-        allAlerts.push({
+        intermediateAlerts.push({
           id: entity.id,
           agency_id: entity.agency_id,
           title: title,
-          description: description,
+          description: plainTextDescription,
+          rawHtmlDescription: rawHtmlDescription,
           affectedLines: Array.from(affectedSystemRouteIds).sort(), // Store processed short names
           startDate: startDateEpoch
             ? new Date(Number(startDateEpoch) * 1000)
@@ -191,16 +178,16 @@ export async function getServiceAlerts(
     } // end if(alert)
   } // end for loop
   logger.info(
-    `[Alerts Service] Parsed ${allAlerts.length} total alerts from feed.`,
+    `[Alerts Service] Parsed ${intermediateAlerts.length} total alerts from feed.`,
   );
 
   // --- Apply Filters ---
-  let filteredAlerts = allAlerts;
+  let filteredIntermediateAlerts = intermediateAlerts;
 
   // 1. Filter by Active Period
   if (filterActiveNow) {
     const now = Date.now();
-    filteredAlerts = filteredAlerts.filter((alert) => {
+    filteredIntermediateAlerts = filteredIntermediateAlerts.filter((alert) => {
       const start = alert.startDate?.getTime();
       const end = alert.endDate?.getTime();
       // Include if: No start date OR start date is in the past/now
@@ -210,7 +197,7 @@ export async function getServiceAlerts(
       return started && notEnded;
     });
     logger.info(
-      `[Alerts Service] Filtered to ${filteredAlerts.length} active alerts.`,
+      `[Alerts Service] Filtered to ${filteredIntermediateAlerts.length} active alerts.`,
     );
   }
 
@@ -220,7 +207,7 @@ export async function getServiceAlerts(
     // Ensure case matches how affectedLinesShortNames were stored
     const targetLinesUpper = targetLines.map((l) => l.toUpperCase());
 
-    filteredAlerts = filteredAlerts.filter((alert) => {
+    filteredIntermediateAlerts = filteredIntermediateAlerts.filter((alert) => {
       // Check if ANY of the alert's affected lines match ANY of the target lines
       return alert.affectedLines.some(
         (alertLine) => targetLinesUpper.includes(alertLine.toUpperCase()), // Case-insensitive check
@@ -228,16 +215,48 @@ export async function getServiceAlerts(
     });
     logger.info(
       `[Alerts Service] Filtered to ${
-        filteredAlerts.length
+        filteredIntermediateAlerts.length
       } alerts affecting lines: [${targetLines.join(", ")}]`,
     );
   }
   // --- End Apply Filters ---
 
   // Sort the *filtered* results (e.g., by start date descending)
-  filteredAlerts.sort(
+  filteredIntermediateAlerts.sort(
     (a, b) => (b.startDate?.getTime() ?? 0) - (a.startDate?.getTime() ?? 0),
   );
 
-  return filteredAlerts;
+  // Convert HTML to Markdown only for the filtered alerts
+  const finalAlerts: ServiceAlert[] = filteredIntermediateAlerts.map(
+    (alert) => {
+      let finalDescription = alert.description; // Start with the plain text/fallback
+
+      //If raw HTML exists for this alert, try converting it
+      if (alert.rawHtmlDescription) {
+        try {
+          finalDescription = turndownService
+            .turndown(alert.rawHtmlDescription)
+            .trim();
+          logger.debug(
+            `[Alerts Service] Final Conversion: Converted HTML to Markdown for alert ${alert.id}.`,
+          );
+        } catch (conversionError) {
+          logger.error(
+            `[Alerts Service] Final Conversion: Failed for alert ${alert.id}. Using fallback description.`,
+            { error: conversionError },
+          );
+          // Keep the plainTextDescription already in alert.description
+        }
+      }
+
+      // Create the final ServiceAlert object without the temporary rawHtmlDescription field
+      const { rawHtmlDescription, ...rest } = alert; // Destructure to remove rawHtmlDescription
+      return {
+        ...rest, // Spread the rest of the properties (id, title, affectedLines, etc.)
+        description: finalDescription, // Use the final (potentially converted) description
+      };
+    },
+  );
+
+  return finalAlerts;
 }

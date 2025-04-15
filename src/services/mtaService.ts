@@ -1,4 +1,5 @@
 import { logger } from "../utils/logger";
+import { analyticsService } from "../services/analyticsService";
 import { fetchAndParseFeed } from "../utils/gtfsFeedParser";
 import { getStaticData } from "./staticDataService";
 import { getActiveServicesForToday } from "./calendarService";
@@ -178,7 +179,13 @@ export async function getDeparturesForStation(
   }
 
   const requestedStationInfo = staticData.stops.get(requestedUniqueStationId); // Lookup by unique key
-  const requestedStationName = requestedStationInfo?.name; // Store for subsequent comparison
+  const stationName = requestedStationInfo?.name || "(Unknown)";
+
+  analyticsService.trackStationLookup(
+    requestedStationInfo?.system || "UNKNOWN",
+    requestedUniqueStationId,
+    stationName,
+  );
 
   if (!requestedStationInfo) {
     logger.warn(

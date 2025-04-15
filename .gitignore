@@ -3,3 +3,6 @@ dist
 .env
 /src/assets
 logs/
+data/
+*.db
+*.sqlite

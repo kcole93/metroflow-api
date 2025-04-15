@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "rimraf ./dist && tsc",
     "start": "LOG_LEVEL=info node dist/server.js",
-    "dev": "LOG_LEVEL=debug nodemon src/server.ts"
+    "dev": "LOG_LEVEL=debug nodemon src/server.ts",
+    "db:reset:analytics": "echo 'Deleting analytics database file (data/analytics.sqlite)...' && rimraf data/analytics.sqlite && echo 'Analytics database deleted. It will be recreated on next server start.'"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +18,7 @@
     "@turf/boolean-point-in-polygon": "^7.2.0",
     "@turf/helpers": "^7.2.0",
     "@types/geojson": "^7946.0.16",
+    "better-sqlite3": "^11.9.1",
     "date-fns": "^4.1.0",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
@@ -31,10 +33,12 @@
       "protobufjs"
     ],
     "onlyBuiltDependencies": [
+      "better-sqlite3",
       "protobufjs"
     ]
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.1",
     "@types/node": "^22.14.0",
     "@types/node-fetch": "^2.6.12",

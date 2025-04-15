@@ -2,6 +2,7 @@ import { ServiceAlert } from "../types";
 import { logger } from "../utils/logger";
 import { fetchAndParseFeed } from "../utils/gtfsFeedParser";
 import { getStaticData } from "./staticDataService";
+import TurndownService from "turndown";
 
 const MTA_API_BASE = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds";
 
@@ -19,6 +20,9 @@ const AGENCY_ID_TO_SYSTEM: { [key: string]: string } = {
   LI: "LIRR",
   MNR: "MNR",
 };
+
+// -- Initialize TurndownService
+const turndownService = new TurndownService();
 
 // --- getServiceAlerts Function ---
 export async function getServiceAlerts(
@@ -111,8 +115,10 @@ export async function getServiceAlerts(
         const getText = (field: any): string | undefined =>
           field?.translation?.[0]?.text;
         const title = getText(alert.header_text) || "Untitled Alert";
+
         let description = "No description."; // Default fallback
         const descriptionTranslations = alert.description_text?.translation;
+        let rawHtmlDescription: string | null = null;
 
         if (descriptionTranslations && Array.isArray(descriptionTranslations)) {
           // Try to find the 'en-html' translation specifically
@@ -121,7 +127,7 @@ export async function getServiceAlerts(
           );
 
           if (htmlTranslation && htmlTranslation.text) {
-            description = htmlTranslation.text; // Use HTML version
+            rawHtmlDescription = htmlTranslation.text;
           } else if (
             descriptionTranslations.length > 0 &&
             descriptionTranslations[0].text
@@ -134,6 +140,29 @@ export async function getServiceAlerts(
             );
           }
         }
+
+        // Convert HTML to Markdown if found
+        if (rawHtmlDescription) {
+          try {
+            description = turndownService.turndown(rawHtmlDescription);
+            description = description.trim();
+            logger.debug(
+              `[Alerts Service] Alert ${entity.id}: Converted HTML description to Markdown.`,
+            );
+          } catch (conversionError) {
+            logger.error(
+              `[Alerts Service] Alert ${entity.id}: Failed to convert description HTML to Markdown. Falling back to plain text if available.`,
+              { error: conversionError },
+            );
+            // Fallback strategy: Use plain text if possible, otherwise the default
+            const plainTranslation = descriptionTranslations?.find(
+              (t: any) => t?.language === "en",
+            );
+            description =
+              plainTranslation?.text || "Description conversion failed.";
+          }
+        }
+
         const url = getText(alert.url);
         const startDateEpoch = alert.active_period?.[0]?.start;
         const endDateEpoch = alert.active_period?.[0]?.end;

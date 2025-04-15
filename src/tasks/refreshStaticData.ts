@@ -8,18 +8,34 @@ import { loadStaticData } from "../services/staticDataService";
 
 const GTFS_STATIC_SOURCES = {
   NYCT: {
-    url: "https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip",
+    url:
+      process.env.GTFS_STATIC_URL_NYCT ||
+      "https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip",
     targetDirName: "NYCT",
   },
   LIRR: {
-    url: "https://rrgtfsfeeds.s3.amazonaws.com/gtfslirr.zip",
+    url:
+      process.env.GTFS_STATIC_URL_LIRR ||
+      "https://rrgtfsfeeds.s3.amazonaws.com/gtfslirr.zip",
     targetDirName: "LIRR",
   },
   MNR: {
-    url: "https://rrgtfsfeeds.s3.amazonaws.com/gtfsmnr.zip",
+    url:
+      process.env.GTFS_STATIC_URL_MNR ||
+      "https://rrgtfsfeeds.s3.amazonaws.com/gtfsmnr.zip",
     targetDirName: "MNR",
   },
 };
+// Check if URLs are provided
+if (
+  !GTFS_STATIC_SOURCES.NYCT.url ||
+  !GTFS_STATIC_SOURCES.LIRR.url ||
+  !GTFS_STATIC_SOURCES.MNR.url
+) {
+  logger.error(
+    "[Static Refresh] Missing required GTFS Static URL environment variables (e.g., GTFS_STATIC_URL_NYCT). Task cannot run.",
+  );
+}
 
 const STATIC_DATA_BASE_PATH = path.join(
   __dirname,
@@ -28,10 +44,6 @@ const STATIC_DATA_BASE_PATH = path.join(
   "gtfs-static",
 );
 const TEMP_DOWNLOAD_DIR = path.join(__dirname, "..", "..", "temp-downloads"); // Create a temporary dir outside src
-
-// Schedule: Once a week at 3am on sunday
-const REFRESH_SCHEDULE = "0 3 * * 0";
-const REFRESH_TIMEZONE = "America/New_York";
 
 // --- Helper: Ensure Directory Exists ---
 async function ensureDirExists(dirPath: string) {

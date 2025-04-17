@@ -39,8 +39,7 @@ COPY --from=builder /app/dist ./dist
 # Copy assets needed at runtime (proto files, geojson)
 # Adjust paths if they are outside 'src' after build
 COPY --from=builder /app/src/assets ./dist/assets
-# ** IMPORTANT: DO NOT COPY src/assets/gtfs-static here **
-# This will be handled by a Docker volume
+COPY --from=builder /app/src/assets/gtfs-static ./dist/assets/gtfs-static
 
 # Expose the port the app runs on
 EXPOSE 3000

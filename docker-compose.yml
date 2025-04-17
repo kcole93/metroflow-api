@@ -20,10 +20,6 @@ services:
       # Mount host directories/named volumes into the container
       - metroflow-data:/app/data # Mount named volume 'metroflow-data' to /app/data in container
       - metroflow-logs:/app/logs # Mount named volume 'metroflow-logs' to /app/logs
-      # ** IMPORTANT for static data refresh **
-      # Mount the host's static data directory into the expected location INSIDE src/assets
-      # because the running code expects it there relative to __dirname after build
-      - ./src/assets/gtfs-static:/app/dist/assets/gtfs-static
 
 # Define the named volumes
 volumes:

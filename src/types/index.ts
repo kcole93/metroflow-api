@@ -12,7 +12,7 @@ export interface Station {
   system?: string;
 }
 
-export type Direction = "N" | "S" | "E" | "W" | "Unknown";
+export type Direction = "N" | "S" | "Inbound" | "Outbound" | "Unknown";
 export type SystemType = "LIRR" | "SUBWAY" | "MNR" | "MIXED" | "UNKNOWN";
 export type PeakStatus = "Peak" | "Off-Peak";
 

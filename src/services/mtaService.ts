@@ -253,7 +253,7 @@ export async function getDeparturesForStation(
     );
     for (const { url: feedUrl, result: fetchedData } of feedFetchResults) {
       if (!fetchedData?.message?.entity) {
-        logger.warn(` -> Skipping feed ${feedUrl}: No valid data returned.`);
+        logger.warn(`-> Skipping feed ${feedUrl}: No valid data returned.`);
         continue; // Skip empty/failed feeds
       }
 
@@ -274,10 +274,10 @@ export async function getDeparturesForStation(
       }
 
       if (!systemName) {
-        logger.warn(` -> Could not determine system for ${feedUrl}. Skipping.`);
+        logger.warn(`-> Could not determine system for ${feedUrl}. Skipping.`);
         continue;
       }
-      logger.debug(`    -> Processing feed for System: ${systemName}`);
+      logger.debug(`-> Processing feed for System: ${systemName}`);
 
       for (const entity of decodedEntities) {
         const trip_update = entity.trip_update;
@@ -322,7 +322,7 @@ export async function getDeparturesForStation(
                 destinationBorough = destStopInfo.borough || null;
               } else {
                 logger.warn(
-                  `      [Dest Calc] Failed lookup for destination stop key: ${destStopKey}`,
+                  `[Dest Calc] Failed lookup for destination stop key: ${destStopKey}`,
                 ); // Log lookup failure
               }
             }
@@ -358,10 +358,6 @@ export async function getDeparturesForStation(
                 (departureTimeLong && Number(departureTimeLong)) > 0 ||
                 (arrivalTimeLong && Number(arrivalTimeLong)) > 0;
 
-              const timeDiffMinutes = relevantTime
-                ? Math.round((relevantTime - now) / 60000)
-                : null;
-
               if (!isTimeValid) {
                 continue;
               } // Skip if time invalid/past/cutoff
@@ -374,33 +370,74 @@ export async function getDeparturesForStation(
                 if (actualRouteId && systemName) {
                   const routeMapKey = `${systemName}-${actualRouteId}`;
                   routeInfo = staticData.routes.get(routeMapKey);
-                  // Optional failure logging
                   if (!routeInfo)
                     logger.warn(
-                      `     [Route Lookup] Failed for key: "${routeMapKey}"`,
+                      `[Route Lookup] Failed for key: "${routeMapKey}"`,
                     );
                 }
 
-                // --- Final Destination Fallback ---
-                let finalDestination = calculatedDestination; // Start with value from Last Stop logic
-                const tripInfo = tripIdFromFeed
-                  ? staticData.trips.get(tripIdFromFeed)
-                  : null; // Optional lookup for headsign fallback
+                // --- Determine Destination ---
+                let finalDestination = "Unknown Destination";
+                let destinationBorough: string | null = null;
+                let destSource = "Default"; // Track source for debugging
+
+                // 1. Try using trip_headsign first
+                if (tripIdFromFeed) {
+                  const staticTrip = staticData.trips.get(tripIdFromFeed);
+                  if (staticTrip?.trip_headsign) {
+                    finalDestination = staticTrip.trip_headsign;
+                    destSource = "Trip Headsign";
+                    if (staticTrip.destinationStopId && staticTrip.system) {
+                      const stop = staticData.stops.get(
+                        staticTrip.destinationStopId,
+                      );
+                      if (stop) {
+                        destinationBorough = stop.borough || null;
+                      }
+                    }
+                  }
+                }
+
+                // 2. Fallback to Last Stop in stopTimeUpdates if headsign wasn't used
+                // Only run if we still have the default destination
                 if (
                   finalDestination === "Unknown Destination" &&
-                  tripInfo?.trip_headsign
+                  stopTimeUpdates.length > 0
                 ) {
-                  finalDestination = tripInfo.trip_headsign;
-                  destSource = "Trip Headsign Fallback"; // Update source if used
+                  destSource = "Last Stop Calc Attempt";
+                  // Find the stop time update with the maximum sequence number
+                  let lastStopUpdate = stopTimeUpdates[0];
+                  let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
+                  for (let i = 1; i < stopTimeUpdates.length; i++) {
+                    const currentSequence =
+                      Number(stopTimeUpdates[i].stop_sequence) || 0;
+                    if (currentSequence > maxSequence) {
+                      maxSequence = currentSequence;
+                      lastStopUpdate = stopTimeUpdates[i];
+                    }
+                  }
+                  const lastStopId = lastStopUpdate?.stop_id?.trim();
+
+                  if (lastStopId && systemName) {
+                    // Construct the UNIQUE key for the destination stop using the determined systemName
+                    const destStopKey = `${systemName}-${lastStopId}`;
+                    const destStopInfo = staticData.stops.get(destStopKey); // Lookup using unique key
+
+                    if (destStopInfo) {
+                      finalDestination = destStopInfo.name; // Use name from CORRECT stop object
+                      destSource = "Last Stop Name"; // Final source
+                      destinationBorough = destStopInfo.borough || null; // Get borough from stop
+                    } else {
+                      logger.warn(
+                        `[Dest Calc Fallback] Failed lookup for destination stop key: ${destStopKey} for trip ${tripIdFromFeed}`,
+                      );
+                      destSource = "Last Stop Lookup Failed";
+                    }
+                  } else {
+                    destSource = "Last Stop ID/System Invalid";
+                  }
                 }
-                if (
-                  finalDestination === "Unknown Destination" &&
-                  routeInfo?.route_long_name
-                ) {
-                  finalDestination = routeInfo.route_long_name;
-                  destSource = "Route Name Fallback"; // Update source if used
-                }
-                // --- End Final Destination ---
+                // --- End Destination Determination ---
 
                 // --- Determine Direction ---
                 let direction: Direction = "Unknown"; // Default to Unknown
@@ -408,7 +445,7 @@ export async function getDeparturesForStation(
                   const nyctTripExt =
                     rtTrip?.[".transit_realtime.nyct_trip_descriptor"]; // Access nested extension
                   logger.debug(
-                    `      [Direction] NYCT Trip Descriptor: ${JSON.stringify(
+                    `[Direction] NYCT Trip Descriptor: ${JSON.stringify(
                       nyctTripExt,
                     )}`,
                   );
@@ -422,7 +459,7 @@ export async function getDeparturesForStation(
                       direction = "S";
                     }
                     logger.debug(
-                      `      [Direction] Using NYCT Trip Descriptor Direction: ${nyctTripExt.direction} -> ${direction}`,
+                      `[Direction] Using NYCT Trip Descriptor Direction: ${nyctTripExt.direction} -> ${direction}`,
                     ); // Log source
                     logger.debug(
                       `[Direction] Set direction from source: ${destSource}`,
@@ -430,19 +467,33 @@ export async function getDeparturesForStation(
                   }
                 } else if (systemName === "LIRR" || systemName === "MNR") {
                   // Use static tripInfo.direction_id for LIRR/MNR
-                  if (tripInfo?.direction_id != null) {
-                    // Check if static trip info was found and has direction
-                    const dirId = tripInfo.direction_id; // Should be 0 or 1
-                    if (dirId === 0) direction = "W";
-                    else if (dirId === 1) direction = "E";
-                    else direction = "Unknown";
-                    logger.debug(
-                      `      [Direction Static Check ${systemName}] Found direction_id: ${dirId} = ${direction}for trip ${tripIdFromFeed}`,
-                    );
+                  if (tripIdFromFeed) {
+                    // Ensure we have a trip ID from the feed
+                    const staticTripInfo = staticData.trips.get(tripIdFromFeed); // Look up static trip using the ID string
+                    if (staticTripInfo?.direction_id != null) {
+                      // Check if the LOOKED UP trip has a direction_id
+                      const dirId = staticTripInfo.direction_id; // Get direction from the STATIC trip object
+                      if (dirId === 0) {
+                        direction = "Outbound";
+                      } else if (dirId === 1) {
+                        direction = "Inbound";
+                      } else {
+                        direction = "Unknown"; // Handle unexpected values
+                      }
+                      logger.debug(
+                        `[Direction Static Check ${systemName}] Found direction_id '${dirId}' -> '${direction}' for trip ${tripIdFromFeed}`,
+                      );
+                    } else {
+                      logger.debug(
+                        `[Direction Static Check ${systemName}] Static tripInfo found BUT no direction_id for trip ${tripIdFromFeed}`,
+                      );
+                      // Direction remains "Unknown", will proceed to suffix fallback
+                    }
                   } else {
                     logger.debug(
-                      `      [Direction Static Check ${systemName}] Static tripInfo or direction_id not found for trip ${tripIdFromFeed}`,
+                      `[Direction Static Check ${systemName}] No tripIdFromFeed available.`,
                     );
+                    // Direction remains "Unknown"
                   }
                 }
 
@@ -453,13 +504,10 @@ export async function getDeparturesForStation(
                     .toUpperCase();
                   if (lastChar === "N") direction = "N";
                   else if (lastChar === "S") direction = "S";
-                  else if (lastChar === "E")
-                    direction = "E"; // Keep E/W for LIRR/MNR
-                  else if (lastChar === "W") direction = "W";
                   if (direction !== "Unknown") {
                     logger.debug(
                       `      [Direction] Using Stop ID Suffix Fallback: ${lastChar} -> ${direction}`,
-                    ); // Log source
+                    );
                   }
                 }
                 // If still Unknown, it remains Unknown
@@ -508,7 +556,7 @@ export async function getDeparturesForStation(
                 }
                 if (relevantTime === null && !hasRealtimePrediction) {
                   logger.debug(
-                    `    [STU Skip] Matched ${stuOriginalStopId}, but NO real-time prediction available in STU.`,
+                    `[STU Skip] Matched ${stuOriginalStopId}, but NO real-time prediction available in STU.`,
                   );
                   continue; // Skip if no time available at all
                 }
@@ -521,9 +569,12 @@ export async function getDeparturesForStation(
                 }
                 // --- End Status ---
 
-                // --- Determine Peak Status using tripInfo ---
-                const peakStatus = getPeakStatus(tripInfo?.peak_offpeak);
-                // ---
+                const staticTripForPeak = tripIdFromFeed
+                  ? staticData.trips.get(tripIdFromFeed)
+                  : null;
+                const peakStatus = getPeakStatus(
+                  staticTripForPeak?.peak_offpeak,
+                );
 
                 // --- Create Departure Object ---
                 const departure: Departure = {
@@ -547,7 +598,7 @@ export async function getDeparturesForStation(
                 totalDeparturesCreated++;
               } catch (mappingError) {
                 logger.error(
-                  `      -> [Mapping Error] Failed create Departure for stop ${stuOriginalStopId}, trip ${tripIdFromFeed}:`,
+                  `-> [Mapping Error] Failed create Departure for stop ${stuOriginalStopId}, trip ${tripIdFromFeed}:`,
                   mappingError,
                 );
               }
@@ -586,6 +637,9 @@ export async function getDeparturesForStation(
       const systemName = requestedStationInfo.system; // LIRR, MNR, or SUBWAY
       const activeServices = await getActiveServicesForToday(); // Get today's active service IDs
       logger.debug(
+        `[Static Fallback ${systemName}] Active Service IDs (${activeServices.size}): ${Array.from(activeServices).join(", ")}`,
+      );
+      logger.debug(
         `[Static Fallback ${systemName}] Found ${activeServices.size} active services today.`,
       );
       // Iterate through the station's platforms (original IDs)
@@ -611,7 +665,28 @@ export async function getDeparturesForStation(
             !tripInfo.service_id ||
             !activeServices.has(tripInfo.service_id)
           ) {
-            continue;
+            if (!tripInfo) {
+              logger.verbose(
+                ` -> SKIP ${staticTripId}: Not found in staticData.trips map.`,
+              );
+            } else if (tripInfo.system !== systemName) {
+              logger.verbose(
+                `-> SKIP ${staticTripId}: System mismatch (${tripInfo.system} != ${systemName}).`,
+              );
+            } else if (!tripInfo.service_id) {
+              logger.verbose(
+                `-> SKIP ${staticTripId}: Missing service_id in tripInfo.`,
+              );
+            } else if (!activeServices.has(tripInfo.service_id)) {
+              logger.verbose(
+                `-> SKIP ${staticTripId}: Service ID [${tripInfo.service_id}] not found in active list.`,
+              );
+            } else {
+              logger.verbose(
+                `-> SKIP ${staticTripId}: Unknown reason within filter block.`,
+              ); // Should not happen
+            }
+            continue; // Skip this trip
           }
 
           // Get scheduled time (prioritize departure)
@@ -627,13 +702,15 @@ export async function getDeparturesForStation(
             // Example: "25:10:00" -> Need to add a day to todayStr
             let hours = parseInt(scheduledTimeStr.substring(0, 2), 10);
             let parseDateStr = todayStr;
+            const adjustedHour = hours % 24;
             let parseTimeStr = scheduledTimeStr;
+
             if (!isNaN(hours) && hours >= 24) {
               // Time is on the next day
               const nextDay = new Date(now + 24 * 60 * 60 * 1000); // Add 24 hours
               parseDateStr = format(nextDay, "yyyy-MM-dd");
               // Adjust time string for parsing
-              parseTimeStr = `${hours % 24}:${scheduledTimeStr.substring(3)}`; // e.g., "01:10:00"
+              parseTimeStr = `${String(adjustedHour).padStart(2, "0")}:${scheduledTimeStr.substring(3)}`; // e.g., "01:10:00"
               logger.debug(
                 `  Adjusted next-day time: ${scheduledTimeStr} -> ${parseDateStr} ${parseTimeStr}`,
               );
@@ -663,7 +740,7 @@ export async function getDeparturesForStation(
             // Log if skipping based on time
             if (relevantTime)
               logger.debug(
-                ` -> Skipping scheduled ${staticTripId}, time ${new Date(relevantTime).toISOString()} out of window`,
+                `-> Skipping scheduled ${staticTripId}, time ${new Date(relevantTime).toISOString()} out of window`,
               );
             continue;
           }
@@ -685,9 +762,8 @@ export async function getDeparturesForStation(
                 routeInfo?.route_long_name || "Unknown Destination";
 
             let direction: Direction = "Unknown";
-            if (tripInfo?.direction_id === 0)
-              direction = "E"; // Assuming 0=East/Outbound
-            else if (tripInfo?.direction_id === 1) direction = "W"; // Assuming 1=West/Inbound
+            if (tripInfo?.direction_id === 0) direction = "Outbound";
+            else if (tripInfo?.direction_id === 1) direction = "Inbound";
 
             let track = stopTimeInfo.track || undefined; // Use track from static stop_times
 
@@ -753,8 +829,8 @@ export async function getDeparturesForStation(
       Northbound: 1,
       Downtown: 2,
       Southbound: 2,
-      Eastbound: 3,
-      Westbound: 4,
+      Inbound: 3,
+      Outbound: 4,
       Unknown: 5,
       zzz: 6,
     };

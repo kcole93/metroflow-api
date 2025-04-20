@@ -61,12 +61,29 @@ function addTripToMap(
   const tripId = t.trip_id?.trim();
   const routeId = t.route_id?.trim();
   if (!tripId || !routeId) return;
+  
+  // Parse direction_id
   let directionIdNum: number | null = null;
   const dirIdStr = t.direction_id;
   if (dirIdStr != null && dirIdStr !== "") {
     const p = parseInt(dirIdStr, 10);
     if (!isNaN(p)) directionIdNum = p;
   }
+  
+  // Parse wheelchair_accessible
+  let wheelchairAccessible: number | null = null;
+  if (t.wheelchair_accessible != null && t.wheelchair_accessible !== "") {
+    const w = parseInt(t.wheelchair_accessible, 10);
+    if (!isNaN(w) && w >= 0 && w <= 2) wheelchairAccessible = w;
+  }
+  
+  // Parse bikes_allowed
+  let bikesAllowed: number | null = null;
+  if (t.bikes_allowed != null && t.bikes_allowed !== "") {
+    const b = parseInt(t.bikes_allowed, 10);
+    if (!isNaN(b) && b >= 0 && b <= 2) bikesAllowed = b;
+  }
+  
   const destStopId = destinations.get(tripId) || null;
   map.set(tripId, {
     // Use the passed 'map' variable
@@ -79,6 +96,8 @@ function addTripToMap(
     direction_id: directionIdNum,
     block_id: t.block_id?.trim() || undefined,
     shape_id: t.shape_id?.trim() || undefined,
+    wheelchair_accessible: wheelchairAccessible,
+    bikes_allowed: bikesAllowed,
     system: system,
     destinationStopId: destStopId,
   });
@@ -360,10 +379,32 @@ export async function loadStaticData(): Promise<void> {
     // --- *** ATOMIC UPDATE *** ---
     // If ALL phases succeeded, overwrite the module-level variable
     // with the newly processed data.
+    // --- 9. Build the tripsByShortName and vehicleTripsMap lookup maps for MNR
+    logger.info("Pass 9: Building lookup maps for MNR...");
+    const tempTripsByShortName = new Map<string, string>();
+    const tempVehicleTripsMap = new Map<string, string>();
+    
+    // Iterate through trips and build the lookup maps
+    for (const [tripId, tripInfo] of tempLoadedTrips.entries()) {
+      if (tripInfo.system === "MNR" && tripInfo.trip_short_name) {
+        // For MNR, the vehicle.label is the trip_short_name
+        // Map trip_short_name to trip_id for easy lookup
+        tempTripsByShortName.set(tripInfo.trip_short_name, tripId);
+        
+        // Also map trip_short_name as vehicleId to trip_id
+        // This allows lookup by vehicle.label
+        tempVehicleTripsMap.set(tripInfo.trip_short_name, tripId);
+      }
+    }
+    
+    logger.info(`Pass 9 finished. Built tripsByShortName map with ${tempTripsByShortName.size} entries and vehicleTripsMap with ${tempVehicleTripsMap.size} entries.`);
+
     staticData = {
       routes: tempLoadedRoutes,
       stops: tempLoadedStops,
       trips: tempLoadedTrips,
+      tripsByShortName: tempTripsByShortName,
+      vehicleTripsMap: tempVehicleTripsMap,
       stopTimeLookup: tempLoadedStopTimeLookup,
       lastRefreshed: new Date(),
     };

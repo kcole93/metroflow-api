@@ -88,12 +88,30 @@ const getDeparturesHandler: RequestHandler = async (req, res) => {
       `[Departures Route] Applying time limit: ${limitMinutes} minutes`,
     );
   }
+  
+  // --- Source Filter Processing
+  const sourceQuery = req.query.source as string | undefined;
+  let sourceFilter: "realtime" | "scheduled" | undefined = undefined;
+  
+  if (sourceQuery) {
+    // Validate the source parameter
+    if (sourceQuery === "realtime" || sourceQuery === "scheduled") {
+      sourceFilter = sourceQuery;
+      logger.info(`[Departures Route] Filtering by source: ${sourceFilter}`);
+    } else {
+      res.status(400).json({
+        error: "Invalid source query parameter. Must be 'realtime' or 'scheduled'."
+      });
+      return;
+    }
+  }
 
   try {
-    // Pass limitMinutes to the service function
+    // Pass both limitMinutes and sourceFilter to the service function
     const departures = await mtaService.getDeparturesForStation(
       stationId,
       limitMinutes,
+      sourceFilter,
     );
     res.json(departures);
   } catch (err) {

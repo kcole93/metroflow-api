@@ -39,6 +39,7 @@
       "protobufjs"
     ],
     "onlyBuiltDependencies": [
+      "@anthropic-ai/claude-code",
       "better-sqlite3",
       "protobufjs"
     ]

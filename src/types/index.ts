@@ -51,6 +51,8 @@ export function normalizeSystemType(system: SystemType): SystemType {
   return system;
 }
 
+export type DepartureSource = "realtime" | "scheduled";
+
 export interface Departure {
   id: string;
   tripId?: string; // For debugging or advanced use
@@ -62,12 +64,18 @@ export interface Departure {
   destination: string; // Often derived from trip headsign or stop sequence
   direction?: Direction | null;
   direction_id?: number | null; // 0 or 1, for LIRR/MNR only
-  departureTime: Date | null; // Predicted or scheduled departure time as a Date object
+  departureTime: Date | null; // Scheduled departure time as a Date object
+  estimatedDepartureTime: Date | null; // Departure time adjusted for delays
   delayMinutes: number | null; // Calculated delay (null if unknown/scheduled)
   track?: string; // Sometimes available in LIRR/NYCT feed extensions
   status: string; // e.g., "On Time", "Delayed X min", "Scheduled", "Due"
   system: SystemType;
   destinationBorough: string | null;
+  isTerminalArrival?: boolean; // Indicates if this is an arrival at a terminal station
+  source: DepartureSource; // Indicates if this departure is from realtime or scheduled data
+  wheelchair_accessible?: number | null; // 0 = no info, 1 = accessible, 2 = not accessible
+  bikes_allowed?: number | null; // 0 = no info, 1 = bikes allowed, 2 = no bikes allowed
+  trainStatus?: string | null; // MNR specific train status from MTARR extensions
 }
 
 export interface ServiceAlert {
@@ -151,12 +159,15 @@ export interface StaticTripInfo {
   trip_headsign?: string; // Usually the destination shown on the train
   trip_short_name?: string;
   peak_offpeak?: string | null;
+  track?: string | null;
   direction_id?: number | null; // 0 or 1, often indicates direction (e.g., Uptown/Downtown)
   block_id?: string;
   shape_id?: string; // Links to shapes.txt for drawing route path
   destinationStopId?: string | null;
   start_date?: string;
   start_time?: string;
+  wheelchair_accessible?: number | null; // 0 = no info, 1 = at least one wheelchair accommodation, 2 = no accommodations
+  bikes_allowed?: number | null; // 0 = no info, 1 = at least one bicycle accommodation, 2 = no accommodations
   system: SystemType;
 }
 
@@ -171,6 +182,10 @@ export interface StaticData {
   routes: Map<string, StaticRouteInfo>;
   /** Map where key is trip_id, value contains full trip information. */
   trips: Map<string, StaticTripInfo>;
+  /** Map where key is trip_short_name, value is trip_id - used for MNR trip lookups where vehicle.label = static trip_short_name */
+  tripsByShortName?: Map<string, string>;
+  /** Map where key is vehicle ID, value is trip_id - used for lookups where vehicleTripId is needed */
+  vehicleTripsMap?: Map<string, string>;
   tripsBySchedule?: Map<string, StaticTripInfo>; // Keyed by schedule info
   stopTimeLookup: Map<string, Map<string, StaticStopTimeInfo>>;
   lastRefreshed: Date;

@@ -147,10 +147,16 @@ const getAlertsHandler: RequestHandler = async (req, res) => {
   if (filterActiveNow) {
     logger.info(`[Alerts Route] Filtering for alerts active now.`);
   }
+  
+  // Filter by station ID (optional)
+  const stationId = req.query.stationId as string | undefined;
+  if (stationId) {
+    logger.info(`[Alerts Route] Filtering for alerts affecting station: ${stationId}`);
+  }
 
   try {
-    // Pass filters to the service function
-    const alerts = await getServiceAlerts(targetLines, filterActiveNow);
+    // Pass all filters to the service function
+    const alerts = await getServiceAlerts(targetLines, filterActiveNow, stationId);
     res.json(alerts);
   } catch (err) {
     handleServiceError(err, res, "Failed to retrieve service alerts.");

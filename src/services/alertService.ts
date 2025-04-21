@@ -34,13 +34,14 @@ interface IntermediateServiceAlert extends Omit<ServiceAlert, "description"> {
 export async function getServiceAlerts(
   targetLines?: string[], // Expects ["SUBWAY-1", "LIRR-1"], etc.
   filterActiveNow = false,
+  stationId?: string,  // Optional station ID to filter alerts affecting a specific station
 ): Promise<ServiceAlert[]> {
   const feedUrl = ALERT_FEEDS.ALL;
   const feedName = "all_service_alerts";
   logger.info(
     `[Alerts Service] Fetching ${feedName}. Filters: targetLines=${
       targetLines?.join(",") || "N/A"
-    }, activeNow=${filterActiveNow}`,
+    }, activeNow=${filterActiveNow}, stationId=${stationId || "N/A"}`,
   );
 
   const staticData = getStaticData();
@@ -70,6 +71,7 @@ export async function getServiceAlerts(
     if (alert) {
       try {
         const affectedSystemRouteIds = new Set<string>(); // Use Set for automatic deduplication
+        const affectedStationIds = new Set<string>(); // Set to track directly affected stations
 
         if (alert.informed_entity) {
           for (const informed of alert.informed_entity) {
@@ -81,44 +83,74 @@ export async function getServiceAlerts(
               continue; // Skip the rest of the loop for this informed_entity
             }
 
-            // --- Disambiguation Logic (for non-skipped entities) ---
-            let potentialSystemRouteId: string | null = null;
-            const routeId = informed.route_id; // Raw route_id ("1")
+            // Get system prefix from agency ID (e.g., "MTASBWY" -> "SUBWAY")
+            const systemPrefix = agencyId && AGENCY_ID_TO_SYSTEM[agencyId];
+            if (!systemPrefix) {
+              logger.debug(
+                `[Alerts Service] Alert ${entity.id}: Unknown agency_id "${agencyId}". May affect stop-level data.`
+              );
+              // Don't skip here - we still want to process stop_id even if agency is unknown
+            }
 
-            // We only care about entities that specify a route
-            if (routeId) {
-              if (agencyId && AGENCY_ID_TO_SYSTEM[agencyId]) {
-                // We have a known agency and a route ID
-                const systemPrefix = AGENCY_ID_TO_SYSTEM[agencyId];
-                potentialSystemRouteId = `${systemPrefix}-${routeId}`;
-                logger.debug(
-                  `[Alerts Service] Alert ${entity.id}: Mapped agency "${agencyId}" + route "${routeId}" to "${potentialSystemRouteId}"`,
-                );
-              } else {
-                // Fallback/Warning: No agency_id or unknown agency_id for a route
-                // If no agency context, we CANNOT reliably disambiguate.
-                logger.warn(
-                  `[Alerts Service] Alert ${entity.id}: Cannot reliably map route_id "${routeId}" to a system. Missing or unknown agency_id "${agencyId}". Skipping this route entity.`,
-                );
-                potentialSystemRouteId = null; // Ensure it's not added
-              }
+            // Handle route_id first
+            const routeId = informed.route_id; // Raw route_id ("1")
+            if (routeId && systemPrefix) {
+              // We have a known agency and a route ID
+              const potentialSystemRouteId = `${systemPrefix}-${routeId}`;
+              logger.debug(
+                `[Alerts Service] Alert ${entity.id}: Mapped agency "${agencyId}" + route "${routeId}" to "${potentialSystemRouteId}"`,
+              );
 
               // Validate constructed ID against static data AND add to Set
-              if (
-                potentialSystemRouteId &&
-                staticRoutes.has(potentialSystemRouteId)
-              ) {
+              if (staticRoutes.has(potentialSystemRouteId)) {
                 affectedSystemRouteIds.add(potentialSystemRouteId);
-              } else if (potentialSystemRouteId) {
-                // Log if we constructed an ID (meaning it wasn't MTABC and had agency info)
-                // but it's not found in our static data map. This might indicate
-                // stale static data or a new route ID in the feed.
+              } else {
+                // Log if we constructed an ID but it's not found in our static data map
                 logger.debug(
                   `[Alerts Service] Alert ${entity.id}: Constructed System-RouteId "${potentialSystemRouteId}" but it's not found in staticRoutes map. Skipping.`,
                 );
               }
             }
-            // TODO: Handle informed.stop_id (map stop to routes?)
+            
+            // Handle stop_id - important for station-specific alerts (elevator outages, etc.)
+            const stopId = informed.stop_id;
+            if (stopId) {
+              // For alerts without a systemPrefix (like elevator alerts), try all possible systems
+              const systemsToTry = systemPrefix ? [systemPrefix] : Object.values(AGENCY_ID_TO_SYSTEM);
+              
+              for (const system of systemsToTry) {
+                const stationId = `${system}-${stopId}`;
+                
+                // Check if this station exists in our static data
+                if (staticData.stops.has(stationId)) {
+                  const stopInfo = staticData.stops.get(stationId);
+                  
+                  // Add the actual stop ID from the alert
+                  affectedStationIds.add(stationId);
+                  
+                  // If this is a child stop, also add its parent station ID
+                  // This ensures the alert shows up when filtered by the parent station ID
+                  if (stopInfo && stopInfo.parentStationId) {
+                    affectedStationIds.add(stopInfo.parentStationId);
+                    logger.debug(
+                      `[Alerts Service] Alert ${entity.id}: Added parent station ${stopInfo.parentStationId} for child stop ${stationId}`
+                    );
+                  }
+                  
+                  logger.debug(
+                    `[Alerts Service] Alert ${entity.id}: Added affected station ${stationId}`
+                  );
+                  break; // Found a match, no need to try other systems
+                }
+              }
+              
+              // Log if we couldn't find a matching station after trying all systems
+              if (systemsToTry.length > 0 && !Array.from(affectedStationIds).some(id => id.endsWith(`-${stopId}`))) {
+                logger.debug(
+                  `[Alerts Service] Alert ${entity.id}: Stop ID ${stopId} not found in static data with any system prefix`
+                );
+              }
+            }
           } // end informed_entity loop
         } // end if(informed_entity)
 
@@ -163,6 +195,7 @@ export async function getServiceAlerts(
           description: plainTextDescription,
           rawHtmlDescription: rawHtmlDescription,
           affectedLines: Array.from(affectedSystemRouteIds).sort(), // Store processed short names
+          affectedStations: Array.from(affectedStationIds).sort(), // Store affected station IDs
           startDate: startDateEpoch
             ? new Date(Number(startDateEpoch) * 1000)
             : undefined,
@@ -219,6 +252,44 @@ export async function getServiceAlerts(
         filteredIntermediateAlerts.length
       } alerts affecting lines: [${targetLines.join(", ")}]`,
     );
+  }
+  
+  // 3. Filter by Station ID
+  if (stationId) {
+    // Get the system type from the station ID (e.g., "LIRR-123" => "LIRR")
+    const [system] = stationId.split('-');
+    
+    // Look up the station info to get the routes that serve this station
+    const staticData = getStaticData();
+    const stationInfo = staticData.stops.get(stationId);
+    
+    if (stationInfo) {
+      // Get routes that serve this station
+      const stationRoutesWithSystem = Array.from(stationInfo.servedByRouteIds || [])
+        .map(routeId => `${system}-${routeId}`);
+      
+      logger.debug(
+        `[Alerts Service] Station ${stationId} (${stationInfo.name}) is served by routes: [${stationRoutesWithSystem.join(', ') || 'none'}]`
+      );
+      
+      // Filter alerts - include if affecting this station directly OR if affecting lines serving this station
+      filteredIntermediateAlerts = filteredIntermediateAlerts.filter(alert => {
+        // Check if alert directly affects this station (direct stop_id match)
+        const directlyAffectsStation = alert.affectedStations.includes(stationId);
+        
+        // Check if alert affects any routes serving this station
+        const affectsStationRoutes = stationRoutesWithSystem.length > 0 && 
+          alert.affectedLines.some(alertLine => stationRoutesWithSystem.includes(alertLine));
+        
+        return directlyAffectsStation || affectsStationRoutes;
+      });
+      
+      logger.info(
+        `[Alerts Service] Filtered to ${filteredIntermediateAlerts.length} alerts affecting station: ${stationId} (${stationInfo.name})`
+      );
+    } else {
+      logger.warn(`[Alerts Service] Could not find station with ID: ${stationId}`);
+    }
   }
   // --- End Apply Filters ---
 

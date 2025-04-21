@@ -77,13 +77,6 @@ function addTripToMap(
     if (!isNaN(w) && w >= 0 && w <= 2) wheelchairAccessible = w;
   }
   
-  // Parse bikes_allowed
-  let bikesAllowed: number | null = null;
-  if (t.bikes_allowed != null && t.bikes_allowed !== "") {
-    const b = parseInt(t.bikes_allowed, 10);
-    if (!isNaN(b) && b >= 0 && b <= 2) bikesAllowed = b;
-  }
-  
   const destStopId = destinations.get(tripId) || null;
   map.set(tripId, {
     // Use the passed 'map' variable
@@ -97,7 +90,6 @@ function addTripToMap(
     block_id: t.block_id?.trim() || undefined,
     shape_id: t.shape_id?.trim() || undefined,
     wheelchair_accessible: wheelchairAccessible,
-    bikes_allowed: bikesAllowed,
     system: system,
     destinationStopId: destStopId,
   });
@@ -133,6 +125,11 @@ function processStop(
     !isNaN(latitude) ? latitude : undefined,
     !isNaN(longitude) ? longitude : undefined,
   );
+  
+  // Determine if this is a terminal/major station 
+  // Currently based on stop names, but we could make this data-driven with a property in stops.txt
+  const stopName = rawStop.stop_name || "";
+  const isTerminal = determineIfTerminal(system, stopName, originalStopId);
 
   // Check the passed 'map' before setting
   if (!map.has(uniqueStopKey)) {
@@ -140,7 +137,7 @@ function processStop(
       // Use the passed 'map' variable
       id: uniqueStopKey,
       originalStopId: originalStopId,
-      name: rawStop.stop_name || "Unnamed Stop",
+      name: stopName,
       latitude: !isNaN(latitude) ? latitude : undefined,
       longitude: !isNaN(longitude) ? longitude : undefined,
       parentStationId: uniqueParentKey,
@@ -150,8 +147,33 @@ function processStop(
       feedUrls: new Set<string>(),
       system: system,
       borough: borough,
+      isTerminal: isTerminal,
     });
   }
+}
+
+// Helper function to determine if a station is a terminal station based on name and system
+function determineIfTerminal(system: SystemType, stopName: string, stopId: string): boolean {
+  // Very common major terminals/hubs that warrant special handling
+  if (system === "MNR") {
+    // MNR Terminal Stations
+    return stopName.includes("Grand Central") || 
+           stopName.includes("Stamford") || 
+           stopName.includes("New Haven") ||
+           stopId === "1"; // Grand Central has ID 1
+  } 
+  else if (system === "LIRR") {
+    // LIRR Terminal Stations
+    return stopName.includes("Penn Station") || 
+           stopName.includes("Atlantic Terminal") || 
+           stopName.includes("Jamaica") ||
+           stopName.includes("Hicksville") ||
+           stopId === "349" || // Penn Station has ID 349
+           stopId === "237" || // Atlantic Terminal
+           stopId === "52";    // Jamaica station
+  }
+  
+  return false;
 }
 
 // --- Main Static Data Loading Function ---

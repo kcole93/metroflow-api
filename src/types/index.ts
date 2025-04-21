@@ -74,8 +74,7 @@ export interface Departure {
   isTerminalArrival?: boolean; // Indicates if this is an arrival at a terminal station
   source: DepartureSource; // Indicates if this departure is from realtime or scheduled data
   wheelchair_accessible?: number | null; // 0 = no info, 1 = accessible, 2 = not accessible
-  bikes_allowed?: number | null; // 0 = no info, 1 = bikes allowed, 2 = no bikes allowed
-  trainStatus?: string | null; // MNR specific train status from MTARR extensions
+  trainStatus?: string | null; // Train status from MTARR extensions (MNR/LIRR)
 }
 
 export interface ServiceAlert {
@@ -108,6 +107,7 @@ export interface StaticStopInfo {
   feedUrls: Set<string>;
   system: SystemType;
   borough?: string | null; // Optional borough name
+  isTerminal?: boolean; // Indicates if this is a terminal station (major hub)
 }
 
 // Helper function to create a case-insensitive Set
@@ -167,7 +167,6 @@ export interface StaticTripInfo {
   start_date?: string;
   start_time?: string;
   wheelchair_accessible?: number | null; // 0 = no info, 1 = at least one wheelchair accommodation, 2 = no accommodations
-  bikes_allowed?: number | null; // 0 = no info, 1 = at least one bicycle accommodation, 2 = no accommodations
   system: SystemType;
 }
 

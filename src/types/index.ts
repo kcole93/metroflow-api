@@ -90,8 +90,10 @@ export interface ServiceAlert {
   agency_id: string;
   title: string;
   description: string;
-  affectedLines: string[]; // Route short names (e.g., ["6", "LIRR-Babylon"])
+  affectedLines: string[]; // Route short names or IDs (e.g., ["SUBWAY-6", "LIRR-Babylon"])
   affectedStations: string[]; // Station IDs directly affected (e.g., ["LIRR-349"])
+  affectedLinesLabels?: string[]; // Human-readable route names (e.g., ["6 Train", "Babylon Branch"])
+  affectedStationsLabels?: string[]; // Human-readable station names (e.g., ["Penn Station"])
   startDate?: Date; // Date object or null
   endDate?: Date; // Date object or null
   url?: string;

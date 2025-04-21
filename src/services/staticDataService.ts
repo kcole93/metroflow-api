@@ -142,7 +142,7 @@ function processStop(
   );
 
   // Determine if this is a terminal/major station
-  // Currently based on stop names, but we could make this data-driven with a property in stops.txt
+  // Currently based on stop names
   const stopName = rawStop.stop_name || "";
   const isTerminal = determineIfTerminal(system, stopName, originalStopId);
 

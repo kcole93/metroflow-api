@@ -153,10 +153,17 @@ const getAlertsHandler: RequestHandler = async (req, res) => {
   if (stationId) {
     logger.info(`[Alerts Route] Filtering for alerts affecting station: ${stationId}`);
   }
+  
+  // Option to include friendly labels
+  const includeLabelsQuery = req.query.includeLabels as string | undefined;
+  const includeLabels = includeLabelsQuery === "true" || includeLabelsQuery === "1";
+  if (includeLabels) {
+    logger.info(`[Alerts Route] Including human-friendly labels for lines and stations.`);
+  }
 
   try {
     // Pass all filters to the service function
-    const alerts = await getServiceAlerts(targetLines, filterActiveNow, stationId);
+    const alerts = await getServiceAlerts(targetLines, filterActiveNow, stationId, includeLabels);
     res.json(alerts);
   } catch (err) {
     handleServiceError(err, res, "Failed to retrieve service alerts.");

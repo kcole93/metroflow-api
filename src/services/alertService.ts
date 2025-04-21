@@ -48,6 +48,8 @@ turndownService.addRule("escapeBrackets", {
 interface IntermediateServiceAlert extends Omit<ServiceAlert, "description"> {
   description: string; // Holds plain text fallback initially
   rawHtmlDescription?: string | null;
+  affectedLinesLabels?: string[]; // Human-readable labels for affected lines
+  affectedStationsLabels?: string[]; // Human-readable labels for affected stations
 }
 
 // --- getServiceAlerts Function ---
@@ -55,6 +57,7 @@ export async function getServiceAlerts(
   targetLines?: string[], // Expects ["SUBWAY-1", "LIRR-1"], etc.
   filterActiveNow = false,
   stationId?: string, // Optional station ID to filter alerts affecting a specific station
+  includeLabels = false, // Whether to include human-readable labels for lines and stations
 ): Promise<ServiceAlert[]> {
   const feedUrl = ALERT_FEEDS.ALL;
   const feedName = "all_service_alerts";
@@ -70,8 +73,9 @@ export async function getServiceAlerts(
   const fetchedData = await fetchAndParseFeed(feedUrl, feedName);
   const message = fetchedData?.message;
 
-  // --- Use Intermediate Type for Initial Parsing ---
-  let intermediateAlerts: IntermediateServiceAlert[] = [];
+  // --- Use Intermediate Type for Initial Parsing with Map to handle duplicates ---
+  let intermediateAlertsMap = new Map<string, IntermediateServiceAlert>();
+  let duplicateEntityIdCount = 0;
 
   let allAlerts: ServiceAlert[] = [];
 
@@ -88,6 +92,17 @@ export async function getServiceAlerts(
 
   for (const entity of message.entity) {
     const alert = entity.alert;
+    const currentEntityId = entity.id;
+    
+    // Skip duplicates using entity.id as the key
+    if (intermediateAlertsMap.has(currentEntityId)) {
+      logger.debug(
+        `[Alerts Service] Skipping duplicate entity with ID: ${currentEntityId}`
+      );
+      duplicateEntityIdCount++;
+      continue;
+    }
+    
     if (alert) {
       try {
         const affectedSystemRouteIds = new Set<string>(); // Use Set for automatic deduplication
@@ -214,15 +229,46 @@ export async function getServiceAlerts(
         const startDateEpoch = alert.active_period?.[0]?.start;
         const endDateEpoch = alert.active_period?.[0]?.end;
 
-        // Create the full alert object
-        intermediateAlerts.push({
+        // Create the intermediate alert object
+        const affectedLinesArray = Array.from(affectedSystemRouteIds).sort();
+        const affectedStationsArray = Array.from(affectedStationIds).sort();
+        
+        // Look up human-friendly labels if requested
+        const affectedLinesLabels = includeLabels 
+          ? affectedLinesArray.map(lineId => {
+              const routeInfo = staticRoutes.get(lineId);
+              if (routeInfo) {
+                // For subway, return "X Train" or "X Express", for railroads return the long name
+                const system = lineId.split('-')[0];
+                if (system === 'SUBWAY') {
+                  // Check if route has "Express" in the long name
+                  const isExpress = routeInfo.route_long_name.toLowerCase().includes('express');
+                  return `${routeInfo.route_short_name} ${isExpress ? 'Express' : 'Train'}`;
+                } else {
+                  return routeInfo.route_long_name;
+                }
+              }
+              return lineId; // Fallback to ID if no friendly name found
+            })
+          : undefined;
+          
+        const affectedStationsLabels = includeLabels
+          ? affectedStationsArray.map(stationId => {
+              const stationInfo = staticData.stops.get(stationId);
+              return stationInfo ? stationInfo.name : stationId;
+            })
+          : undefined;
+          
+        const intermediateAlert: IntermediateServiceAlert = {
           id: entity.id,
           agency_id: entity.agency_id,
           title: title,
           description: plainTextDescription,
           rawHtmlDescription: rawHtmlDescription,
-          affectedLines: Array.from(affectedSystemRouteIds).sort(), // Store processed short names
-          affectedStations: Array.from(affectedStationIds).sort(), // Store affected station IDs
+          affectedLines: affectedLinesArray,
+          affectedStations: affectedStationsArray,
+          affectedLinesLabels,
+          affectedStationsLabels,
           startDate: startDateEpoch
             ? new Date(Number(startDateEpoch) * 1000)
             : undefined,
@@ -230,7 +276,10 @@ export async function getServiceAlerts(
             ? new Date(Number(endDateEpoch) * 1000)
             : undefined,
           url: url,
-        });
+        };
+        
+        // Store in map instead of pushing to array
+        intermediateAlertsMap.set(currentEntityId, intermediateAlert);
       } catch (alertError) {
         logger.error(
           `[Alerts Service] Error processing alert entity ${entity.id}:`,
@@ -239,12 +288,20 @@ export async function getServiceAlerts(
       }
     } // end if(alert)
   } // end for loop
+  
+  if (duplicateEntityIdCount > 0) {
+    logger.info(
+      `[Alerts Service] Skipped ${duplicateEntityIdCount} duplicate entities based on ID.`
+    );
+  }
+  
   logger.info(
-    `[Alerts Service] Parsed ${intermediateAlerts.length} total alerts from feed.`,
+    `[Alerts Service] Parsed ${intermediateAlertsMap.size} unique alerts from feed.`,
   );
 
   // --- Apply Filters ---
-  let filteredIntermediateAlerts = intermediateAlerts;
+  // Convert the map values to an array for filtering
+  let filteredIntermediateAlerts = Array.from(intermediateAlertsMap.values());
 
   // 1. Filter by Active Period
   if (filterActiveNow) {

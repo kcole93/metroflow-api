@@ -9,6 +9,7 @@ import {
   StaticTripInfo,
   StaticStopTimeInfo,
   SystemType,
+  Note,
 } from "../types";
 import * as dotenv from "dotenv";
 import { getBoroughForCoordinates } from "./geoService";
@@ -29,6 +30,9 @@ interface StopTimeBase {
   stop_id: string;
   stop_sequence: string;
   track?: string;
+  pickup_type?: string;
+  drop_off_type?: string;
+  note_id?: string;
 }
 
 function addRouteToMap(
@@ -61,7 +65,7 @@ function addTripToMap(
   const tripId = t.trip_id?.trim();
   const routeId = t.route_id?.trim();
   if (!tripId || !routeId) return;
-  
+
   // Parse direction_id
   let directionIdNum: number | null = null;
   const dirIdStr = t.direction_id;
@@ -69,14 +73,14 @@ function addTripToMap(
     const p = parseInt(dirIdStr, 10);
     if (!isNaN(p)) directionIdNum = p;
   }
-  
+
   // Parse wheelchair_accessible
   let wheelchairAccessible: number | null = null;
   if (t.wheelchair_accessible != null && t.wheelchair_accessible !== "") {
     const w = parseInt(t.wheelchair_accessible, 10);
     if (!isNaN(w) && w >= 0 && w <= 2) wheelchairAccessible = w;
   }
-  
+
   const destStopId = destinations.get(tripId) || null;
   map.set(tripId, {
     // Use the passed 'map' variable
@@ -111,7 +115,7 @@ function processStop(
     typeof rawStop.stop_lon === "string"
       ? parseFloat(rawStop.stop_lon)
       : rawStop.stop_lon;
-  
+
   // Parse locationType
   let locationTypeNum: number | null = null;
   const locStr = rawStop.location_type;
@@ -119,7 +123,7 @@ function processStop(
     const p = parseInt(locStr, 10);
     if (!isNaN(p)) locationTypeNum = p;
   }
-  
+
   // Parse wheelchair_boarding
   let wheelchairBoardingNum: number | null = null;
   const wheelchairStr = rawStop.wheelchair_boarding;
@@ -127,7 +131,7 @@ function processStop(
     const w = parseInt(wheelchairStr, 10);
     if (!isNaN(w) && w >= 0 && w <= 2) wheelchairBoardingNum = w;
   }
-  
+
   const parentStationFileId = rawStop.parent_station?.trim() || null;
   const uniqueParentKey = parentStationFileId
     ? `${system}-${parentStationFileId}`
@@ -136,19 +140,24 @@ function processStop(
     !isNaN(latitude) ? latitude : undefined,
     !isNaN(longitude) ? longitude : undefined,
   );
-  
-  // Determine if this is a terminal/major station 
+
+  // Determine if this is a terminal/major station
   // Currently based on stop names, but we could make this data-driven with a property in stops.txt
   const stopName = rawStop.stop_name || "";
   const isTerminal = determineIfTerminal(system, stopName, originalStopId);
 
   // Log wheelchair accessibility info for LIRR stations
   if (system === "LIRR" && wheelchairBoardingNum !== null) {
-    const accessibilityStatus = 
-      wheelchairBoardingNum === 0 ? "No information" :
-      wheelchairBoardingNum === 1 ? "Accessible" : "Not accessible";
-    
-    logger.debug(`[LIRR Accessibility] Station ${stopName} (${originalStopId}): ${accessibilityStatus}`);
+    const accessibilityStatus =
+      wheelchairBoardingNum === 0
+        ? "No information"
+        : wheelchairBoardingNum === 1
+          ? "Accessible"
+          : "Not accessible";
+
+    logger.debug(
+      `[LIRR Accessibility] Station ${stopName} (${originalStopId}): ${accessibilityStatus}`,
+    );
   }
 
   // Check the passed 'map' before setting
@@ -174,26 +183,33 @@ function processStop(
 }
 
 // Helper function to determine if a station is a terminal station based on name and system
-function determineIfTerminal(system: SystemType, stopName: string, stopId: string): boolean {
+function determineIfTerminal(
+  system: SystemType,
+  stopName: string,
+  stopId: string,
+): boolean {
   // Very common major terminals/hubs that warrant special handling
   if (system === "MNR") {
     // MNR Terminal Stations
-    return stopName.includes("Grand Central") || 
-           stopName.includes("Stamford") || 
-           stopName.includes("New Haven") ||
-           stopId === "1"; // Grand Central has ID 1
-  } 
-  else if (system === "LIRR") {
+    return (
+      stopName.includes("Grand Central") ||
+      stopName.includes("Stamford") ||
+      stopName.includes("New Haven") ||
+      stopId === "1"
+    ); // Grand Central has ID 1
+  } else if (system === "LIRR") {
     // LIRR Terminal Stations
-    return stopName.includes("Penn Station") || 
-           stopName.includes("Atlantic Terminal") || 
-           stopName.includes("Jamaica") ||
-           stopName.includes("Hicksville") ||
-           stopId === "349" || // Penn Station has ID 349
-           stopId === "237" || // Atlantic Terminal
-           stopId === "52";    // Jamaica station
+    return (
+      stopName.includes("Penn Station") ||
+      stopName.includes("Atlantic Terminal") ||
+      stopName.includes("Jamaica") ||
+      stopName.includes("Hicksville") ||
+      stopId === "349" || // Penn Station has ID 349
+      stopId === "237" || // Atlantic Terminal
+      stopId === "52"
+    ); // Jamaica station
   }
-  
+
   return false;
 }
 
@@ -344,12 +360,51 @@ export async function loadStaticData(): Promise<void> {
           new Map<string, StaticStopTimeInfo>(),
         );
       }
-      tempLoadedStopTimeLookup.get(stopId)?.set(tripId, {
+      // Parse pickup_type and drop_off_type values if available
+      let pickupType: number | null = null;
+      let dropOffType: number | null = null;
+
+      if (st.pickup_type) {
+        const pickupVal = parseInt(st.pickup_type.trim(), 10);
+        if (!isNaN(pickupVal) && pickupVal >= 0 && pickupVal <= 3) {
+          pickupType = pickupVal;
+        }
+      }
+
+      if (st.drop_off_type) {
+        const dropOffVal = parseInt(st.drop_off_type.trim(), 10);
+        if (!isNaN(dropOffVal) && dropOffVal >= 0 && dropOffVal <= 3) {
+          dropOffType = dropOffVal;
+        }
+      }
+
+      // Create the stop time info object once to reuse
+      const stopTimeInfo: StaticStopTimeInfo = {
         scheduledArrivalTime: st.arrival_time?.trim() || null,
         scheduledDepartureTime: st.departure_time?.trim() || null,
         stopSequence: stopSequence,
         track: st.track?.trim() || null,
-      });
+        pickupType: pickupType,
+        dropOffType: dropOffType,
+        noteId: st.note_id?.trim() || null,
+      };
+
+      // Add the primary entry with the original tripId
+      tempLoadedStopTimeLookup.get(stopId)?.set(tripId, stopTimeInfo);
+
+      // Check if this trip exists in the trips map to determine the system
+      // For MNR trips specifically, we need to also index by vehicle label/trip_short_name
+      const tripInfo = tempLoadedTrips.get(tripId);
+      if (tripInfo?.system === "MNR" && tripInfo.trip_short_name) {
+        // For MNR, add another entry using trip_short_name as key
+        // This allows lookup by vehicle.label in the real-time feed
+        tempLoadedStopTimeLookup
+          .get(stopId)
+          ?.set(tripInfo.trip_short_name, stopTimeInfo);
+        logger.debug(
+          `[MNR StopTime] Added additional lookup key for stop ${stopId}: ${tripInfo.trip_short_name} -> ${tripId}`,
+        );
+      }
     }
     logger.info(
       `Pass 7 finished. Built stopTimeLookup map for ${tempLoadedStopTimeLookup.size} stops.`,
@@ -426,21 +481,59 @@ export async function loadStaticData(): Promise<void> {
     logger.info("Pass 9: Building lookup maps for MNR...");
     const tempTripsByShortName = new Map<string, string>();
     const tempVehicleTripsMap = new Map<string, string>();
-    
+
     // Iterate through trips and build the lookup maps
     for (const [tripId, tripInfo] of tempLoadedTrips.entries()) {
       if (tripInfo.system === "MNR" && tripInfo.trip_short_name) {
         // For MNR, the vehicle.label is the trip_short_name
         // Map trip_short_name to trip_id for easy lookup
         tempTripsByShortName.set(tripInfo.trip_short_name, tripId);
-        
+
         // Also map trip_short_name as vehicleId to trip_id
         // This allows lookup by vehicle.label
         tempVehicleTripsMap.set(tripInfo.trip_short_name, tripId);
       }
     }
-    
-    logger.info(`Pass 9 finished. Built tripsByShortName map with ${tempTripsByShortName.size} entries and vehicleTripsMap with ${tempVehicleTripsMap.size} entries.`);
+
+    logger.info(
+      `Pass 9 finished. Built tripsByShortName map with ${tempTripsByShortName.size} entries and vehicleTripsMap with ${tempVehicleTripsMap.size} entries.`,
+    );
+
+    // --- 10. Load notes.txt file for MNR ---
+    logger.info("Pass 10: Loading notes.txt for MNR...");
+    const tempNotes = new Map<string, Note>();
+
+    try {
+      // Only MNR has notes.txt so we only need to check there
+      const mnrNotesPath = path.join(systems[2].path, "notes.txt");
+      const mnrNotesRaw = await parseCsvFile<any>(mnrNotesPath, logger);
+
+      if (mnrNotesRaw && mnrNotesRaw.length > 0) {
+        for (const note of mnrNotesRaw) {
+          const noteId = note.note_id?.trim();
+          if (!noteId) continue;
+
+          tempNotes.set(noteId, {
+            noteId: noteId,
+            noteMark: note.note_mark?.trim() || "",
+            noteTitle: note.note_title?.trim() || "",
+            noteDesc: note.note_desc?.trim() || "",
+          });
+        }
+        logger.info(`Loaded ${tempNotes.size} notes from MNR notes.txt`);
+      } else {
+        logger.warn(
+          "No notes found in MNR notes.txt or file could not be parsed",
+        );
+      }
+    } catch (error) {
+      // Just log the error but continue - notes are non-critical
+      logger.warn(`Failed to load MNR notes.txt: ${error}`);
+    }
+
+    logger.info(
+      `Pass 10 finished. Loaded ${tempNotes.size} notes from MNR notes.txt.`,
+    );
 
     staticData = {
       routes: tempLoadedRoutes,
@@ -449,6 +542,7 @@ export async function loadStaticData(): Promise<void> {
       tripsByShortName: tempTripsByShortName,
       vehicleTripsMap: tempVehicleTripsMap,
       stopTimeLookup: tempLoadedStopTimeLookup,
+      notes: tempNotes,
       lastRefreshed: new Date(),
     };
     // Ensure your StaticData type includes lastRefreshed: Date;

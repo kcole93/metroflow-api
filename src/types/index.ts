@@ -22,7 +22,10 @@ export interface StaticStopTimeInfo {
   scheduledArrivalTime?: string | null; // Store as HH:MM:SS string
   stopSequence: number;
   track?: string | null; // Include track if available in stop_times.txt
-  // Add other stop_time fields if needed (pickup_type, etc.)
+  pickupType?: number | null; // 0=Regular, 1=No pickup, 2=Call agency, 3=Coordinate with driver
+  dropOffType?: number | null; // 0=Regular, 1=No drop off, 2=Call agency, 3=Coordinate with driver
+  noteId?: string | null; // References specific notes for this stop time (MNR/LIRR)
+  noteText?: string | null; // The actual note text associated with the noteId
 }
 
 /**
@@ -76,6 +79,10 @@ export interface Departure {
   source: DepartureSource; // Indicates if this departure is from realtime or scheduled data
   wheelchair_accessible?: number | null; // 0 = no info, 1 = accessible, 2 = not accessible
   trainStatus?: string | null; // Train status from MTARR extensions (MNR/LIRR)
+  pickupType?: number | null; // 0=Regular, 1=No pickup, 2=Call agency, 3=Coordinate with driver
+  dropOffType?: number | null; // 0=Regular, 1=No drop off, 2=Call agency, 3=Coordinate with driver
+  noteId?: string | null; // References specific notes for this stop time (MNR/LIRR)
+  noteText?: string | null; // The actual note text associated with the noteId
 }
 
 export interface ServiceAlert {
@@ -177,6 +184,13 @@ export interface StaticTripInfo {
  * Container for all loaded and processed static GTFS data.
  * This structure holds the maps used for efficient lookups within the services.
  */
+export interface Note {
+  noteId: string;      // Unique identifier, like "H" or "B"
+  noteMark: string;    // Display marker
+  noteTitle: string;   // Title/heading for the note
+  noteDesc: string;    // Full description text
+}
+
 export interface StaticData {
   /** Enriched map where key is stop_id, value contains full stop info including related routes and feed URLs. */
   stops: Map<string, StaticStopInfo>;
@@ -190,5 +204,7 @@ export interface StaticData {
   vehicleTripsMap?: Map<string, string>;
   tripsBySchedule?: Map<string, StaticTripInfo>; // Keyed by schedule info
   stopTimeLookup: Map<string, Map<string, StaticStopTimeInfo>>;
+  /** Map where key is note_id, value contains note information (used for MNR notes.txt) */
+  notes?: Map<string, Note>;
   lastRefreshed: Date;
 }

@@ -111,12 +111,23 @@ function processStop(
     typeof rawStop.stop_lon === "string"
       ? parseFloat(rawStop.stop_lon)
       : rawStop.stop_lon;
+  
+  // Parse locationType
   let locationTypeNum: number | null = null;
   const locStr = rawStop.location_type;
   if (typeof locStr === "string" && locStr.trim() !== "") {
     const p = parseInt(locStr, 10);
     if (!isNaN(p)) locationTypeNum = p;
   }
+  
+  // Parse wheelchair_boarding
+  let wheelchairBoardingNum: number | null = null;
+  const wheelchairStr = rawStop.wheelchair_boarding;
+  if (typeof wheelchairStr === "string" && wheelchairStr.trim() !== "") {
+    const w = parseInt(wheelchairStr, 10);
+    if (!isNaN(w) && w >= 0 && w <= 2) wheelchairBoardingNum = w;
+  }
+  
   const parentStationFileId = rawStop.parent_station?.trim() || null;
   const uniqueParentKey = parentStationFileId
     ? `${system}-${parentStationFileId}`
@@ -130,6 +141,15 @@ function processStop(
   // Currently based on stop names, but we could make this data-driven with a property in stops.txt
   const stopName = rawStop.stop_name || "";
   const isTerminal = determineIfTerminal(system, stopName, originalStopId);
+
+  // Log wheelchair accessibility info for LIRR stations
+  if (system === "LIRR" && wheelchairBoardingNum !== null) {
+    const accessibilityStatus = 
+      wheelchairBoardingNum === 0 ? "No information" :
+      wheelchairBoardingNum === 1 ? "Accessible" : "Not accessible";
+    
+    logger.debug(`[LIRR Accessibility] Station ${stopName} (${originalStopId}): ${accessibilityStatus}`);
+  }
 
   // Check the passed 'map' before setting
   if (!map.has(uniqueStopKey)) {
@@ -148,6 +168,7 @@ function processStop(
       system: system,
       borough: borough,
       isTerminal: isTerminal,
+      wheelchairBoarding: wheelchairBoardingNum,
     });
   }
 }

@@ -10,6 +10,7 @@ export interface Station {
   longitude?: number;
   lines?: string[]; // Array of route short names (e.g., ["1"], ["B", "C"])
   system?: string;
+  wheelchair_boarding?: number; // 0=No info, 1=Some accessible boarding, 2=Not possible
 }
 
 export type Direction = "N" | "S" | "Inbound" | "Outbound" | "Unknown";
@@ -108,6 +109,7 @@ export interface StaticStopInfo {
   system: SystemType;
   borough?: string | null; // Optional borough name
   isTerminal?: boolean; // Indicates if this is a terminal station (major hub)
+  wheelchairBoarding?: number | null; // 0=No information, 1=Some accessible boarding, 2=Not possible
 }
 
 // Helper function to create a case-insensitive Set

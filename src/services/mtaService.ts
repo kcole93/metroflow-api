@@ -146,6 +146,7 @@ export async function getStations(
         longitude: stopInfo.longitude,
         lines: lines.sort(),
         system: stopInfo.system,
+        wheelchair_boarding: stopInfo.wheelchairBoarding || undefined,
       });
     }
   }

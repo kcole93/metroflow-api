@@ -21,8 +21,28 @@ const AGENCY_ID_TO_SYSTEM: { [key: string]: string } = {
   MNR: "MNR",
 };
 
-// -- Initialize TurndownService
-const turndownService = new TurndownService();
+// -- Initialize TurndownService with custom configuration
+const turndownService = new TurndownService({
+  headingStyle: "atx",
+  bulletListMarker: "-",
+  codeBlockStyle: "fenced",
+  emDelimiter: "_",
+});
+
+// Configure turndown to handle bracket characters properly (common in subway line names)
+// This prevents the escaping of characters like [1], [A], etc. in train names
+turndownService.addRule("escapeBrackets", {
+  filter: (node) => {
+    // Only process text nodes that contain escaped brackets
+    if (node.nodeType !== 3) return false;
+    const nodeValue = node.nodeValue || '';
+    return nodeValue.includes("\\[") || nodeValue.includes("\\]");
+  },
+  replacement: (content) => {
+    // Replace escaped brackets with unescaped ones
+    return content.replace(/\\\[/g, "[").replace(/\\\]/g, "]");
+  },
+});
 
 // Temporary internal type to hold raw HTML before final conversion
 interface IntermediateServiceAlert extends Omit<ServiceAlert, "description"> {
@@ -34,7 +54,7 @@ interface IntermediateServiceAlert extends Omit<ServiceAlert, "description"> {
 export async function getServiceAlerts(
   targetLines?: string[], // Expects ["SUBWAY-1", "LIRR-1"], etc.
   filterActiveNow = false,
-  stationId?: string,  // Optional station ID to filter alerts affecting a specific station
+  stationId?: string, // Optional station ID to filter alerts affecting a specific station
 ): Promise<ServiceAlert[]> {
   const feedUrl = ALERT_FEEDS.ALL;
   const feedName = "all_service_alerts";
@@ -87,7 +107,7 @@ export async function getServiceAlerts(
             const systemPrefix = agencyId && AGENCY_ID_TO_SYSTEM[agencyId];
             if (!systemPrefix) {
               logger.debug(
-                `[Alerts Service] Alert ${entity.id}: Unknown agency_id "${agencyId}". May affect stop-level data.`
+                `[Alerts Service] Alert ${entity.id}: Unknown agency_id "${agencyId}". May affect stop-level data.`,
               );
               // Don't skip here - we still want to process stop_id even if agency is unknown
             }
@@ -111,43 +131,50 @@ export async function getServiceAlerts(
                 );
               }
             }
-            
+
             // Handle stop_id - important for station-specific alerts (elevator outages, etc.)
             const stopId = informed.stop_id;
             if (stopId) {
               // For alerts without a systemPrefix (like elevator alerts), try all possible systems
-              const systemsToTry = systemPrefix ? [systemPrefix] : Object.values(AGENCY_ID_TO_SYSTEM);
-              
+              const systemsToTry = systemPrefix
+                ? [systemPrefix]
+                : Object.values(AGENCY_ID_TO_SYSTEM);
+
               for (const system of systemsToTry) {
                 const stationId = `${system}-${stopId}`;
-                
+
                 // Check if this station exists in our static data
                 if (staticData.stops.has(stationId)) {
                   const stopInfo = staticData.stops.get(stationId);
-                  
+
                   // Add the actual stop ID from the alert
                   affectedStationIds.add(stationId);
-                  
+
                   // If this is a child stop, also add its parent station ID
                   // This ensures the alert shows up when filtered by the parent station ID
                   if (stopInfo && stopInfo.parentStationId) {
                     affectedStationIds.add(stopInfo.parentStationId);
                     logger.debug(
-                      `[Alerts Service] Alert ${entity.id}: Added parent station ${stopInfo.parentStationId} for child stop ${stationId}`
+                      `[Alerts Service] Alert ${entity.id}: Added parent station ${stopInfo.parentStationId} for child stop ${stationId}`,
                     );
                   }
-                  
+
                   logger.debug(
-                    `[Alerts Service] Alert ${entity.id}: Added affected station ${stationId}`
+                    `[Alerts Service] Alert ${entity.id}: Added affected station ${stationId}`,
                   );
                   break; // Found a match, no need to try other systems
                 }
               }
-              
+
               // Log if we couldn't find a matching station after trying all systems
-              if (systemsToTry.length > 0 && !Array.from(affectedStationIds).some(id => id.endsWith(`-${stopId}`))) {
+              if (
+                systemsToTry.length > 0 &&
+                !Array.from(affectedStationIds).some((id) =>
+                  id.endsWith(`-${stopId}`),
+                )
+              ) {
                 logger.debug(
-                  `[Alerts Service] Alert ${entity.id}: Stop ID ${stopId} not found in static data with any system prefix`
+                  `[Alerts Service] Alert ${entity.id}: Stop ID ${stopId} not found in static data with any system prefix`,
                 );
               }
             }
@@ -253,42 +280,51 @@ export async function getServiceAlerts(
       } alerts affecting lines: [${targetLines.join(", ")}]`,
     );
   }
-  
+
   // 3. Filter by Station ID
   if (stationId) {
     // Get the system type from the station ID (e.g., "LIRR-123" => "LIRR")
-    const [system] = stationId.split('-');
-    
+    const [system] = stationId.split("-");
+
     // Look up the station info to get the routes that serve this station
     const staticData = getStaticData();
     const stationInfo = staticData.stops.get(stationId);
-    
+
     if (stationInfo) {
       // Get routes that serve this station
-      const stationRoutesWithSystem = Array.from(stationInfo.servedByRouteIds || [])
-        .map(routeId => `${system}-${routeId}`);
-      
+      const stationRoutesWithSystem = Array.from(
+        stationInfo.servedByRouteIds || [],
+      ).map((routeId) => `${system}-${routeId}`);
+
       logger.debug(
-        `[Alerts Service] Station ${stationId} (${stationInfo.name}) is served by routes: [${stationRoutesWithSystem.join(', ') || 'none'}]`
+        `[Alerts Service] Station ${stationId} (${stationInfo.name}) is served by routes: [${stationRoutesWithSystem.join(", ") || "none"}]`,
       );
-      
+
       // Filter alerts - include if affecting this station directly OR if affecting lines serving this station
-      filteredIntermediateAlerts = filteredIntermediateAlerts.filter(alert => {
-        // Check if alert directly affects this station (direct stop_id match)
-        const directlyAffectsStation = alert.affectedStations.includes(stationId);
-        
-        // Check if alert affects any routes serving this station
-        const affectsStationRoutes = stationRoutesWithSystem.length > 0 && 
-          alert.affectedLines.some(alertLine => stationRoutesWithSystem.includes(alertLine));
-        
-        return directlyAffectsStation || affectsStationRoutes;
-      });
-      
+      filteredIntermediateAlerts = filteredIntermediateAlerts.filter(
+        (alert) => {
+          // Check if alert directly affects this station (direct stop_id match)
+          const directlyAffectsStation =
+            alert.affectedStations.includes(stationId);
+
+          // Check if alert affects any routes serving this station
+          const affectsStationRoutes =
+            stationRoutesWithSystem.length > 0 &&
+            alert.affectedLines.some((alertLine) =>
+              stationRoutesWithSystem.includes(alertLine),
+            );
+
+          return directlyAffectsStation || affectsStationRoutes;
+        },
+      );
+
       logger.info(
-        `[Alerts Service] Filtered to ${filteredIntermediateAlerts.length} alerts affecting station: ${stationId} (${stationInfo.name})`
+        `[Alerts Service] Filtered to ${filteredIntermediateAlerts.length} alerts affecting station: ${stationId} (${stationInfo.name})`,
       );
     } else {
-      logger.warn(`[Alerts Service] Could not find station with ID: ${stationId}`);
+      logger.warn(
+        `[Alerts Service] Could not find station with ID: ${stationId}`,
+      );
     }
   }
   // --- End Apply Filters ---
@@ -306,9 +342,27 @@ export async function getServiceAlerts(
       //If raw HTML exists for this alert, try converting it
       if (alert.rawHtmlDescription) {
         try {
-          finalDescription = turndownService
+          // Convert the HTML to Markdown
+          let markdown = turndownService
             .turndown(alert.rawHtmlDescription)
             .trim();
+
+          // Additional post-processing to clean up common issues
+          // 1. Fix doubly escaped brackets that might have been missed by the rule
+          markdown = markdown.replace(/\\\[/g, "[").replace(/\\\]/g, "]");
+
+          // 2. Fix any consecutive line breaks (more than 2) to just 2
+          markdown = markdown.replace(/\n{3,}/g, "\n\n");
+
+          // 3. Clean up any HTML entities that weren't properly converted
+          markdown = markdown
+            .replace(/&amp;/g, "&")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&nbsp;/g, " ");
+
+          finalDescription = markdown;
+
           logger.debug(
             `[Alerts Service] Final Conversion: Converted HTML to Markdown for alert ${alert.id}.`,
           );

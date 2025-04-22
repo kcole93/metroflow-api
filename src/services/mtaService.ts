@@ -15,6 +15,7 @@ import {
   PeakStatus,
   DepartureSource,
   StaticStopTimeInfo,
+  StaticTripInfo,
 } from "../types";
 import * as dotenv from "dotenv";
 
@@ -166,23 +167,1361 @@ function getPeakStatus(
   }
   return null;
 }
-// ---
 
-// --- Get Realtime Departures ForStation (with Static Fallback for LIRR/MNR) ---
+// --- Helper function to determine system from feed URL ---
+function getSystemFromFeedUrl(feedUrl: string): SystemType | null {
+  if (feedUrl === LIRR_FEED) return "LIRR";
+  if (feedUrl === MNR_FEED) return "MNR";
+
+  for (const key in SUBWAY_FEEDS) {
+    if (SUBWAY_FEEDS[key as keyof typeof SUBWAY_FEEDS] === feedUrl) {
+      return "SUBWAY";
+    }
+  }
+
+  return null;
+}
+
+// --- Helper to get normalized trip ID for MNR/LIRR ---
+function normalizeTripId(tripId: string, systemName: SystemType): string {
+  if (systemName === "MNR" || systemName === "LIRR") {
+    // Remove leading zeros for MNR/LIRR trip IDs
+    return tripId.replace(/^0+/, "");
+  }
+  return tripId;
+}
+
+// --- Helper to find static trip info for a given trip ID ---
+function findStaticTripInfo(
+  tripIdFromFeed: string,
+  systemName: SystemType,
+  entity: any,
+  staticData: StaticData,
+  processedRealtimeTripIds: Set<string>,
+): { staticTripInfo: StaticTripInfo | null; effectiveTripId: string } {
+  let staticTripInfo: StaticTripInfo | null = null;
+  let effectiveTripId = tripIdFromFeed;
+
+  if (systemName === "MNR") {
+    // For MNR, need to use vehicleTripId (vehicle.vehicle.label) for lookup
+    const vehicleLabel = entity.vehicle?.vehicle?.label?.trim();
+
+    if (vehicleLabel) {
+      // Use vehicleLabel to look up the actual trip_id via vehicleTripsMap or tripsByShortName
+      const staticTripId =
+        staticData.vehicleTripsMap?.get(vehicleLabel) ||
+        staticData.tripsByShortName?.get(vehicleLabel);
+
+      if (staticTripId) {
+        const tripInfo = staticData.trips.get(staticTripId);
+        staticTripInfo = tripInfo || null;
+        logger.debug(
+          `[MNR Trip] Found static trip using vehicle label ${vehicleLabel}: ${staticTripId}`,
+        );
+
+        // Track the vehicle label as a processed trip to avoid duplicates from static data
+        processedRealtimeTripIds.add(vehicleLabel);
+        effectiveTripId = vehicleLabel;
+      }
+    } else {
+      // Fallback to the old method if vehicle label isn't available
+      const staticTripId = staticData.tripsByShortName?.get(tripIdFromFeed);
+      if (staticTripId) {
+        const tripInfo = staticData.trips.get(staticTripId);
+        staticTripInfo = tripInfo || null;
+      }
+    }
+
+    if (!staticTripInfo) {
+      // If no match by vehicle label or trip_short_name, try direct trip_id lookup as last resort
+      const tripInfo = staticData.trips.get(tripIdFromFeed);
+      staticTripInfo = tripInfo || null;
+    }
+  } else {
+    // For LIRR and other systems, we can use the trip_id directly
+    const tripInfo = staticData.trips.get(tripIdFromFeed);
+    staticTripInfo = tripInfo || null;
+  }
+
+  return { staticTripInfo, effectiveTripId };
+}
+
+// --- Helper to determine trip direction ---
+function determineTripDirection(
+  systemName: SystemType,
+  staticTripInfo: StaticTripInfo | null,
+  rtTrip: any,
+  tripIdFromFeed: string,
+  stopTimeUpdates: any[],
+): Direction {
+  let tripDirection: Direction = "Unknown";
+
+  // Special case for MNR - prioritize static data for accuracy, but have fallbacks
+  if (systemName === "MNR") {
+    // For MNR, first check the static data (most reliable source when available)
+    logger.debug(
+      `[MNR Direction Debug] Trip ${tripIdFromFeed} static data check: hasStaticTripInfo=${!!staticTripInfo}, direction_id=${staticTripInfo?.direction_id}`,
+    );
+
+    if (staticTripInfo?.direction_id != null) {
+      const dirId = staticTripInfo.direction_id;
+      if (dirId === 0) {
+        tripDirection = "Outbound";
+        logger.debug(
+          `[MNR Direction] Trip ${tripIdFromFeed} direction from static data: Outbound (direction_id: 0)`,
+        );
+      } else if (dirId === 1) {
+        tripDirection = "Inbound";
+        logger.debug(
+          `[MNR Direction] Trip ${tripIdFromFeed} direction from static data: Inbound (direction_id: 1)`,
+        );
+      } else {
+        // Log unexpected direction_id values
+        logger.warn(
+          `[MNR Direction] Trip ${tripIdFromFeed} has unusual direction_id value: ${dirId}`,
+        );
+      }
+    } else if (staticTripInfo) {
+      logger.warn(
+        `[MNR Direction] Trip ${tripIdFromFeed} has matched static data but direction_id is null or undefined`,
+      );
+    }
+
+    // If static data didn't provide direction, infer from stop sequence
+    if (tripDirection === "Unknown" && stopTimeUpdates.length > 0) {
+      // Find the first and last stop in sequence
+      let firstStop = stopTimeUpdates[0];
+      let lastStop = stopTimeUpdates[0];
+      let minSequence = Number(firstStop.stop_sequence) || 0;
+      let maxSequence = Number(lastStop.stop_sequence) || 0;
+
+      for (let i = 1; i < stopTimeUpdates.length; i++) {
+        const currentSequence = Number(stopTimeUpdates[i].stop_sequence) || 0;
+        if (currentSequence < minSequence) {
+          minSequence = currentSequence;
+          firstStop = stopTimeUpdates[i];
+        }
+        if (currentSequence > maxSequence) {
+          maxSequence = currentSequence;
+          lastStop = stopTimeUpdates[i];
+        }
+      }
+
+      // Grand Central is stop_id 1
+      const firstStopId = firstStop.stop_id?.trim();
+      const lastStopId = lastStop.stop_id?.trim();
+
+      if (lastStopId === "1") {
+        // If train ends at Grand Central, it's inbound
+        tripDirection = "Inbound";
+        logger.debug(
+          `[MNR Direction] Trip ${tripIdFromFeed} determined as Inbound (ends at Grand Central)`,
+        );
+      } else if (firstStopId === "1") {
+        // If train starts at Grand Central, it's outbound
+        tripDirection = "Outbound";
+        logger.debug(
+          `[MNR Direction] Trip ${tripIdFromFeed} determined as Outbound (starts at Grand Central)`,
+        );
+      }
+    }
+
+    // Log if we still don't have a direction
+    if (tripDirection === "Unknown") {
+      logger.warn(
+        `[MNR Direction] Unable to determine direction for trip ${tripIdFromFeed}`,
+      );
+    }
+  } else if (staticTripInfo) {
+    // For other systems, use static info if available
+    if (systemName === "LIRR") {
+      if (staticTripInfo.direction_id != null) {
+        const dirId = staticTripInfo.direction_id;
+        if (dirId === 0) tripDirection = "Outbound";
+        else if (dirId === 1) tripDirection = "Inbound";
+      }
+    }
+  } else if (systemName === "SUBWAY") {
+    const nyctTripExt = rtTrip?.[".transit_realtime.nyct_trip_descriptor"];
+    if (nyctTripExt?.direction === 1) tripDirection = "N";
+    else if (nyctTripExt?.direction === 3) tripDirection = "S";
+  }
+
+  return tripDirection;
+}
+
+// --- Helper to find the destination for a trip ---
+function determineDestination(
+  systemName: SystemType,
+  staticTripInfo: StaticTripInfo | null,
+  rtTrip: any,
+  stopTimeUpdates: any[],
+  staticData: StaticData,
+): { finalDestination: string; destinationBorough: string | null } {
+  let finalDestination = "Unknown Destination";
+  let destinationBorough: string | null = null;
+  let destSource = "Unknown"; // For debugging purposes
+
+  // For MNR trains, prioritize static trip data headsign first since we now have accurate mapping
+  if (systemName === "MNR" && staticTripInfo) {
+    // --- MNR Method 1: Try trip_headsign from static data first (most reliable for MNR) ---
+    if (staticTripInfo.trip_headsign) {
+      destSource = "Trip Headsign";
+      finalDestination = staticTripInfo.trip_headsign;
+      logger.debug(
+        `[MNR Destination] Set from trip_headsign: ${finalDestination}`,
+      );
+    }
+    // --- MNR Method 2: Try static destination stop ID if headsign not available ---
+    else if (staticTripInfo.destinationStopId) {
+      destSource = "Static DestinationStopId";
+      const staticDestKey = `${staticTripInfo.system}-${staticTripInfo.destinationStopId}`;
+      const staticDestStop = staticData.stops.get(staticDestKey);
+
+      if (staticDestStop) {
+        finalDestination = staticDestStop.name;
+        destinationBorough = staticDestStop.borough || null;
+        logger.debug(
+          `[MNR Destination] Set from static destinationStopId: ${finalDestination} (${staticDestKey})`,
+        );
+      }
+    }
+    // --- MNR Method 3: Fall back to last stop in sequence ---
+    else if (stopTimeUpdates.length > 0) {
+      destSource = "Last Stop Calculation";
+      // Find the stop time update with the maximum sequence number
+      let lastStopUpdate = stopTimeUpdates[0];
+      let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
+
+      for (let i = 1; i < stopTimeUpdates.length; i++) {
+        const currentSequence = Number(stopTimeUpdates[i].stop_sequence) || 0;
+        if (currentSequence > maxSequence) {
+          maxSequence = currentSequence;
+          lastStopUpdate = stopTimeUpdates[i];
+        }
+      }
+
+      const lastStopId = lastStopUpdate?.stop_id?.trim();
+      if (lastStopId) {
+        // Construct the unique key for the destination stop
+        const destStopKey = `${systemName}-${lastStopId}`;
+        const destStopInfo = staticData.stops.get(destStopKey);
+
+        if (destStopInfo) {
+          finalDestination = destStopInfo.name;
+          destinationBorough = destStopInfo.borough || null;
+          destSource = "Last Stop Name";
+          logger.debug(
+            `[MNR Destination] Set from last stop: ${finalDestination} (${destStopKey})`,
+          );
+        }
+      }
+    }
+  } else if (systemName === "SUBWAY") {
+    // --- SUBWAY: Prioritize headsign for better rider wayfinding ---
+
+    // --- Method 1: Try trip_headsign from static data first for subway ---
+    if (staticTripInfo?.trip_headsign) {
+      destSource = "Trip Headsign";
+      finalDestination = staticTripInfo.trip_headsign;
+      logger.debug(
+        `[Subway Destination] Set from trip_headsign: ${finalDestination}`,
+      );
+
+      // After setting the destination from headsign, check if the trip has been shortened
+      // by comparing with the last stop in the realtime feed
+      if (stopTimeUpdates.length > 0) {
+        // Find the last stop in sequence
+        let lastStopUpdate = stopTimeUpdates[0];
+        let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
+
+        for (let i = 1; i < stopTimeUpdates.length; i++) {
+          const currentSequence = Number(stopTimeUpdates[i].stop_sequence) || 0;
+          if (currentSequence > maxSequence) {
+            maxSequence = currentSequence;
+            lastStopUpdate = stopTimeUpdates[i];
+          }
+        }
+
+        const lastStopId = lastStopUpdate?.stop_id?.trim();
+        if (lastStopId) {
+          const destStopKey = `${systemName}-${lastStopId}`;
+          const destStopInfo = staticData.stops.get(destStopKey);
+
+          // If the last stop from realtime has a name and it's different from the headsign,
+          // append this information to indicate a shortened trip
+          if (
+            destStopInfo &&
+            destStopInfo.name !== finalDestination &&
+            destStopInfo.name.length > 0
+          ) {
+            finalDestination = `${finalDestination} (Trip ends at ${destStopInfo.name})`;
+            destinationBorough = destStopInfo.borough || null;
+            destSource = "Headsign with shortened trip";
+            logger.debug(
+              `[Subway Destination] Detected shortened trip: ${finalDestination}`,
+            );
+          }
+        }
+      }
+    }
+    // --- Method 2: If no headsign, try static destination stop ID ---
+    else if (staticTripInfo?.destinationStopId && staticTripInfo.system) {
+      destSource = "Static DestinationStopId";
+      const staticDestKey = `${staticTripInfo.system}-${staticTripInfo.destinationStopId}`;
+      const staticDestStop = staticData.stops.get(staticDestKey);
+
+      if (staticDestStop) {
+        finalDestination = staticDestStop.name;
+        destinationBorough = staticDestStop.borough || null;
+        logger.debug(
+          `[Subway Destination] Set from static destinationStopId: ${finalDestination} (${staticDestKey})`,
+        );
+      }
+    }
+    // --- Method 3: If previous methods failed, use last stop from realtime ---
+    else if (stopTimeUpdates.length > 0) {
+      destSource = "Last Stop Calculation";
+      let lastStopUpdate = stopTimeUpdates[0];
+      let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
+
+      for (let i = 1; i < stopTimeUpdates.length; i++) {
+        const currentSequence = Number(stopTimeUpdates[i].stop_sequence) || 0;
+        if (currentSequence > maxSequence) {
+          maxSequence = currentSequence;
+          lastStopUpdate = stopTimeUpdates[i];
+        }
+      }
+
+      const lastStopId = lastStopUpdate?.stop_id?.trim();
+      if (lastStopId) {
+        const destStopKey = `${systemName}-${lastStopId}`;
+        const destStopInfo = staticData.stops.get(destStopKey);
+
+        if (destStopInfo) {
+          finalDestination = destStopInfo.name;
+          destinationBorough = destStopInfo.borough || null;
+          destSource = "Last Stop Name";
+          logger.debug(
+            `[Subway Destination] Set from last stop: ${finalDestination} (${destStopKey})`,
+          );
+        }
+      }
+    }
+  } else {
+    // --- For LIRR and other non-MNR/non-Subway systems ---
+
+    // --- Method 1: Find the last stop in sequence ---
+    if (stopTimeUpdates.length > 0) {
+      destSource = "Last Stop Calculation";
+      // Find the stop time update with the maximum sequence number
+      let lastStopUpdate = stopTimeUpdates[0];
+      let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
+
+      for (let i = 1; i < stopTimeUpdates.length; i++) {
+        const currentSequence = Number(stopTimeUpdates[i].stop_sequence) || 0;
+        if (currentSequence > maxSequence) {
+          maxSequence = currentSequence;
+          lastStopUpdate = stopTimeUpdates[i];
+        }
+      }
+
+      const lastStopId = lastStopUpdate?.stop_id?.trim();
+      if (lastStopId && systemName) {
+        // Construct the unique key for the destination stop
+        const destStopKey = `${systemName}-${lastStopId}`;
+        const destStopInfo = staticData.stops.get(destStopKey);
+
+        if (destStopInfo) {
+          finalDestination = destStopInfo.name;
+          destinationBorough = destStopInfo.borough || null;
+          destSource = "Last Stop Name";
+          logger.debug(
+            `[Destination] Set from last stop: ${finalDestination} (${destStopKey})`,
+          );
+        } else {
+          logger.debug(
+            `[Destination] Failed lookup for last stop key: ${destStopKey}`,
+          );
+        }
+      }
+    }
+
+    // --- Method 2: Try static destination stop ID if method 1 failed ---
+    if (
+      finalDestination === "Unknown Destination" &&
+      staticTripInfo?.destinationStopId &&
+      staticTripInfo.system
+    ) {
+      destSource = "Static DestinationStopId";
+      const staticDestKey = `${staticTripInfo.system}-${staticTripInfo.destinationStopId}`;
+      const staticDestStop = staticData.stops.get(staticDestKey);
+
+      if (staticDestStop) {
+        finalDestination = staticDestStop.name;
+        destinationBorough = staticDestStop.borough || null;
+        logger.debug(
+          `[Destination] Set from static destinationStopId: ${finalDestination} (${staticDestKey})`,
+        );
+      } else {
+        logger.debug(
+          `[Destination] Failed lookup for static destination stop key: ${staticDestKey}`,
+        );
+      }
+    }
+
+    // --- Method 3: Fallback to trip_headsign if methods 1 & 2 failed ---
+    if (
+      finalDestination === "Unknown Destination" &&
+      staticTripInfo?.trip_headsign
+    ) {
+      destSource = "Trip Headsign";
+      finalDestination = staticTripInfo.trip_headsign;
+      logger.debug(`[Destination] Set from trip_headsign: ${finalDestination}`);
+    }
+  }
+
+  // --- Method 4: Last resort for all systems - try route's long name ---
+  if (
+    finalDestination === "Unknown Destination" &&
+    rtTrip?.route_id &&
+    systemName
+  ) {
+    destSource = "Route Long Name";
+    const routeKey = `${systemName}-${rtTrip.route_id}`;
+    const routeInfo = staticData.routes.get(routeKey);
+
+    if (routeInfo?.route_long_name) {
+      finalDestination = routeInfo.route_long_name;
+      logger.debug(
+        `[Destination] Set from route_long_name: ${finalDestination}`,
+      );
+    }
+  }
+
+  if (finalDestination === "Unknown Destination") {
+    logger.warn(`[Destination] Could not determine destination for trip`);
+  }
+
+  return { finalDestination, destinationBorough };
+}
+
+// --- Helper to determine if a stop is a terminal arrival ---
+function checkIsTerminalArrival(
+  stu: any,
+  systemName: SystemType,
+  stopTimeUpdates: any[],
+  stuOriginalStopId: string,
+  staticData: StaticData,
+): boolean {
+  // Check if this is the last stop of the trip
+  let isLastStop = false;
+  if (stopTimeUpdates.length > 0) {
+    const thisSeq = Number(stu.stop_sequence) || 0;
+    // Using explicit typing for the callback
+    isLastStop = stopTimeUpdates.every(
+      (otherStu: { stop_sequence?: string | number }) => {
+        const otherSeq = Number(otherStu.stop_sequence) || 0;
+        return otherSeq <= thisSeq;
+      },
+    );
+  }
+
+  // For MNR and LIRR, we need additional checks to identify terminal arrivals
+  if (systemName === "MNR" || systemName === "LIRR") {
+    // Get the unique stop key for this system and stop ID
+    const stopKey = `${systemName}-${stuOriginalStopId}`;
+    // Look up stop info to check if it's a terminal station
+    const stopInfo = staticData.stops.get(stopKey);
+    const isTerminalStation = stopInfo?.isTerminal || false;
+
+    // If this is a known terminal station or the last stop of the trip
+    if (isTerminalStation || isLastStop) {
+      logger.debug(
+        `[${systemName} Terminal] Identified terminal arrival at ${stuOriginalStopId} (${stopInfo?.name || "Unknown"}) for trip (isTerminalStation: ${isTerminalStation}, isLastStop: ${isLastStop})`,
+      );
+      return true;
+    }
+  } else if (isLastStop) {
+    // For other systems, just use the last stop check
+    return true;
+  }
+
+  return false;
+}
+
+// --- Helper to extract track information from stop time update ---
+function extractTrackInfo(
+  stu: any,
+  systemName: SystemType,
+  originalChildStopIds: Set<string>,
+): string | undefined {
+  // Get extensions appropriate to the system type
+  const mtarrExtension =
+    systemName === "LIRR" || systemName === "MNR"
+      ? stu[".transit_realtime.mta_railroad_stop_time_update"]
+      : null;
+
+  const nyctExtension =
+    systemName === "SUBWAY"
+      ? stu[".transit_realtime.nyct_stop_time_update"]
+      : null;
+
+  // Determine track from available sources
+  let track: string | undefined;
+
+  // For LIRR, use ONLY the mtarrExtension track
+  if (systemName === "LIRR") {
+    // Check if this is the stop time update for the current station
+    const isForCurrentStation = originalChildStopIds.has(stu.stop_id);
+
+    // If it's for the current station and has the MTARR extension, extract track info
+    if (mtarrExtension && isForCurrentStation) {
+      // Always try to extract track information regardless of any other factors
+      if (mtarrExtension.track && mtarrExtension.track.trim() !== "") {
+        track = mtarrExtension.track;
+        logger.debug(
+          `[LIRR Track] Got track from MTARR extension: ${track} for stop ${stu.stop_id}`,
+        );
+      }
+    }
+  }
+  // For MNR, use the mtarrExtension track similarly to LIRR
+  else if (systemName === "MNR") {
+    // Check if this is the stop time update for the current station
+    const isForCurrentStation = originalChildStopIds.has(stu.stop_id);
+
+    // If it's for the current station and has the MTARR extension, extract track info
+    if (mtarrExtension && isForCurrentStation && mtarrExtension.track) {
+      if (mtarrExtension.track.trim() !== "") {
+        track = mtarrExtension.track;
+        logger.debug(
+          `[MNR Track] Got track from MTARR extension: ${track} for stop ${stu.stop_id}`,
+        );
+      }
+    }
+  }
+  // For Subway, use the nyctExtension
+  else if (systemName === "SUBWAY" && nyctExtension) {
+    track = nyctExtension.actualTrack;
+  }
+
+  // Fallbacks for MNR and Subway only (not for LIRR)
+  if (!track && systemName !== "LIRR") {
+    track = stu.departure?.track || stu.arrival?.track || undefined;
+  }
+
+  // Log MNR track sources for debugging
+  if (systemName === "MNR") {
+    if (mtarrExtension || stu.departure?.track || stu.arrival?.track) {
+      logger.debug(
+        `[MNR Track] Trip sources: MTARR=${!!mtarrExtension}, departure=${!!stu.departure?.track}, arrival=${!!stu.arrival?.track}, final=${track}`,
+      );
+    }
+  }
+
+  return track;
+}
+
+// --- Helper to find static stop time info ---
+function findStaticStopTimeInfo(
+  stu: any,
+  systemName: SystemType,
+  tripIdFromFeed: string,
+  staticTripInfo: StaticTripInfo | null,
+  entity: any,
+  staticData: StaticData,
+): StaticStopTimeInfo | null {
+  const stopTimesForStop = staticData.stopTimeLookup.get(stu.stop_id);
+  let staticStopTimeInfo: StaticStopTimeInfo | null = null;
+
+  if (!stopTimesForStop) {
+    logger.debug(
+      `[Stop Time Debug] No stop times found for stop ${stu.stop_id}`,
+    );
+    return null;
+  }
+
+  // Different lookup logic based on system type
+  if (systemName === "MNR") {
+    // For MNR, we need to try multiple possible keys:
+
+    // 1. Try using the vehicle.label/trip_short_name (most reliable for MNR)
+    const mnrVehicleLabel = entity.vehicle?.vehicle?.label?.trim();
+    if (mnrVehicleLabel && stopTimesForStop.has(mnrVehicleLabel)) {
+      staticStopTimeInfo = stopTimesForStop.get(mnrVehicleLabel) || null;
+      logger.debug(
+        `[MNR Stop Time] Found using vehicle label ${mnrVehicleLabel} for stop ${stu.stop_id}`,
+      );
+    }
+    // 2. Try using the static trip ID if available
+    else if (staticTripInfo && stopTimesForStop.has(staticTripInfo.trip_id)) {
+      staticStopTimeInfo = stopTimesForStop.get(staticTripInfo.trip_id) || null;
+      logger.debug(
+        `[MNR Stop Time] Found using static trip ID ${staticTripInfo.trip_id} for stop ${stu.stop_id}`,
+      );
+    }
+    // 3. Try using trip_short_name from static trip if available
+    else if (
+      staticTripInfo?.trip_short_name &&
+      stopTimesForStop.has(staticTripInfo.trip_short_name)
+    ) {
+      staticStopTimeInfo =
+        stopTimesForStop.get(staticTripInfo.trip_short_name) || null;
+      logger.debug(
+        `[MNR Stop Time] Found using trip_short_name ${staticTripInfo.trip_short_name} for stop ${stu.stop_id}`,
+      );
+    }
+    // 4. Try with the normalized tripIdFromFeed as last resort
+    else if (stopTimesForStop.has(tripIdFromFeed)) {
+      staticStopTimeInfo = stopTimesForStop.get(tripIdFromFeed) || null;
+      logger.debug(
+        `[MNR Stop Time] Found using feed trip ID ${tripIdFromFeed} for stop ${stu.stop_id}`,
+      );
+    }
+    // Log if we still couldn't find a match
+    else {
+      logger.debug(
+        `[MNR Stop Time] No match found for stop ${stu.stop_id} using any ID. vehicleLabel=${entity.vehicle?.vehicle?.label?.trim() || "N/A"}, tripID=${tripIdFromFeed}, staticTripID=${staticTripInfo?.trip_id || "N/A"}, trip_short_name=${staticTripInfo?.trip_short_name || "N/A"}`,
+      );
+
+      // For debugging, show a sample of available keys in the stopTimesForStop map
+      const availableKeys = Array.from(stopTimesForStop.keys())
+        .slice(0, 5)
+        .join(", ");
+      logger.debug(
+        `[MNR Stop Time Keys] Sample keys for stop ${stu.stop_id}: ${availableKeys}...`,
+      );
+    }
+  } else {
+    // For LIRR and Subway, use the tripIdFromFeed directly (simpler case)
+    if (stopTimesForStop.has(tripIdFromFeed)) {
+      staticStopTimeInfo = stopTimesForStop.get(tripIdFromFeed) || null;
+      logger.debug(
+        `[Stop Time] Found for ${systemName} using trip ID ${tripIdFromFeed} for stop ${stu.stop_id}`,
+      );
+    } else {
+      logger.debug(
+        `[Stop Time] No match found for ${systemName} stop ${stu.stop_id} with trip ID ${tripIdFromFeed}`,
+      );
+    }
+  }
+
+  // Log what we found
+  if (staticStopTimeInfo) {
+    logger.debug(
+      `[Stop Time Found] For ${systemName} trip at stop ${stu.stop_id}: pickup=${staticStopTimeInfo.pickupType}, dropoff=${staticStopTimeInfo.dropOffType}`,
+    );
+  }
+
+  return staticStopTimeInfo;
+}
+
+// --- Helper to get note text for a stop time ---
+function getNoteText(
+  staticStopTimeInfo: StaticStopTimeInfo | null,
+  staticData: StaticData,
+): string | null {
+  if (staticStopTimeInfo?.noteId && staticData.notes) {
+    const note = staticData.notes.get(staticStopTimeInfo.noteId);
+    if (note) {
+      logger.debug(
+        `[Note] Found note for noteId ${staticStopTimeInfo.noteId}: "${note.noteDesc}"`,
+      );
+      return note.noteDesc || null;
+    }
+  }
+  return null;
+}
+
+// --- Helper to determine departures status based on time and delay ---
+function getDepartureStatus(
+  relevantTime: number,
+  now: number,
+  delayMinutes: number | null,
+): string {
+  if (delayMinutes != null) {
+    if (delayMinutes > 1) return `Delayed ${delayMinutes} min`;
+    else if (delayMinutes < -1) return `Early ${Math.abs(delayMinutes)} min`;
+    else return "On Time";
+  } else {
+    // Proximity if no delay but RT time exists
+    const diffMillis = relevantTime - now;
+    if (diffMillis < 120000 && diffMillis >= 30000) return "Approaching";
+    else if (diffMillis < 30000 && diffMillis >= -30000) return "Due";
+    // else remains "Scheduled" even with RT time if far out
+    return "Scheduled";
+  }
+}
+
+// --- Helper to create a realtime departure object ---
+function createRealtimeDeparture(
+  rtTrip: any,
+  stu: any,
+  entity: any,
+  systemName: SystemType,
+  staticData: StaticData,
+  staticTripInfo: StaticTripInfo | null,
+  effectiveTripId: string,
+  tripDirection: Direction,
+  finalDestination: string,
+  destinationBorough: string | null,
+  relevantTime: number,
+  isTerminalArrival: boolean,
+  track: string | undefined,
+  now: number,
+  originalChildStopIds: Set<string>,
+): Departure | null {
+  try {
+    const hasRealtimePrediction = true;
+
+    // --- Route Info Lookup ---
+    const actualRouteId = rtTrip?.route_id?.trim();
+    let routeInfo: StaticRouteInfo | undefined | null = null;
+
+    if (actualRouteId && systemName) {
+      const routeMapKey = `${systemName}-${actualRouteId}`;
+      routeInfo = staticData.routes.get(routeMapKey);
+      if (!routeInfo) {
+        logger.debug(`[Route Lookup] Failed for key: "${routeMapKey}"`);
+      }
+    }
+
+    // --- Delay ---
+    const delaySecs = hasRealtimePrediction
+      ? (stu.departure?.delay ?? stu.arrival?.delay)
+      : null;
+    const delayMinutes = delaySecs != null ? Math.round(delaySecs / 60) : null;
+
+    // --- Status based on RT prediction ---
+    const status = getDepartureStatus(relevantTime, now, delayMinutes);
+
+    // --- Determine Peak Status ---
+    const peakStatus = getPeakStatus(staticTripInfo?.peak_offpeak);
+
+    // Log peak status for MNR trains (to help verify correct data flow)
+    if (systemName === "MNR" && staticTripInfo?.peak_offpeak) {
+      logger.debug(
+        `[MNR Peak Status] Trip has peak_offpeak=${staticTripInfo.peak_offpeak}, parsed as ${peakStatus || "null"}`,
+      );
+    }
+
+    // Create the scheduled departureTime
+    const scheduledTime = relevantTime ? new Date(relevantTime) : null;
+
+    // Calculate the estimatedDepartureTime based on delays
+    let estimatedTime: Date | null = null;
+    if (scheduledTime && delayMinutes !== null) {
+      estimatedTime = new Date(
+        scheduledTime.getTime() + delayMinutes * 60 * 1000,
+      );
+    } else {
+      estimatedTime = scheduledTime; // If no delay, estimated = scheduled
+    }
+
+    // Extract trainStatus from MTA railroad extensions if available for MNR and LIRR
+    let trainStatus: string | null = null;
+    const mtarrExtension =
+      stu[".transit_realtime.mta_railroad_stop_time_update"];
+
+    if (
+      (systemName === "MNR" || systemName === "LIRR") &&
+      mtarrExtension &&
+      mtarrExtension.trainStatus
+    ) {
+      // Only use non-empty trainStatus values
+      if (
+        mtarrExtension.trainStatus &&
+        mtarrExtension.trainStatus.trim() !== ""
+      ) {
+        trainStatus = mtarrExtension.trainStatus;
+      }
+    }
+
+    // Get stop time info for pickup/dropoff details
+    const staticStopTimeInfo = findStaticStopTimeInfo(
+      stu,
+      systemName,
+      effectiveTripId,
+      staticTripInfo,
+      entity,
+      staticData,
+    );
+
+    // Get note text if available
+    const noteText = getNoteText(staticStopTimeInfo, staticData);
+
+    // Create the departure object
+    const departure: Departure = {
+      id: `${effectiveTripId}-${stu.stop_id}-${relevantTime}`,
+      tripId: effectiveTripId,
+      routeId: actualRouteId,
+      routeShortName: routeInfo?.route_short_name || "",
+      routeLongName: routeInfo?.route_long_name || "",
+      peakStatus: peakStatus,
+      routeColor: routeInfo?.route_color || null,
+      destination: finalDestination,
+      departureTime: scheduledTime,
+      estimatedDepartureTime: estimatedTime,
+      delayMinutes: delayMinutes,
+      track: track,
+      status: status,
+      direction: tripDirection,
+      system: systemName,
+      destinationBorough,
+      isTerminalArrival: isTerminalArrival || undefined,
+      source: "realtime",
+      // Add wheelchair accessibility info from static data
+      wheelchair_accessible: staticTripInfo?.wheelchair_accessible || null,
+      // Add trainStatus from MTARR extensions for MNR/LIRR
+      trainStatus,
+      // Add pickup_type, drop_off_type, and note_id from static stop time info
+      pickupType: staticStopTimeInfo?.pickupType || null,
+      dropOffType: staticStopTimeInfo?.dropOffType || null,
+      noteId: staticStopTimeInfo?.noteId || null,
+      noteText: noteText,
+    };
+
+    return departure;
+  } catch (error) {
+    logger.error(`Error creating realtime departure: ${error}`);
+    return null;
+  }
+}
+
+// --- Helper to create a scheduled departure from static data ---
+function createScheduledDeparture(
+  staticTripId: string,
+  tripInfo: StaticTripInfo,
+  stopTimeInfo: StaticStopTimeInfo,
+  platformId: string,
+  systemName: SystemType,
+  staticData: StaticData,
+  scheduledTime: Date,
+): Departure | null {
+  try {
+    const actualRouteId = tripInfo.route_id;
+    const routeMapKey = `${systemName}-${actualRouteId}`;
+    const routeInfo = staticData.routes.get(routeMapKey);
+
+    let finalDestination = tripInfo.destinationStopId
+      ? staticData.stops.get(`${systemName}-${tripInfo.destinationStopId}`)
+          ?.name
+      : null;
+    if (!finalDestination) finalDestination = tripInfo.trip_headsign;
+    if (!finalDestination)
+      finalDestination = routeInfo?.route_short_name || "Unknown Destination";
+
+    let direction: Direction = "Unknown";
+
+    // Determine direction based on system type
+    if (systemName === "MNR") {
+      if (
+        tripInfo?.direction_id !== undefined &&
+        tripInfo?.direction_id !== null
+      ) {
+        const parsedDirId = Number(String(tripInfo.direction_id));
+        if (parsedDirId === 1) {
+          direction = "Outbound";
+        } else if (parsedDirId === 0) {
+          direction = "Inbound";
+        }
+      }
+    } else {
+      // Standard behavior for non-MNR trips
+      if (tripInfo?.direction_id === 0) direction = "Outbound";
+      else if (tripInfo?.direction_id === 1) direction = "Inbound";
+    }
+
+    // Determine peak status
+    const peakStatus = getPeakStatus(tripInfo?.peak_offpeak);
+
+    // For MNR static trips, include trip_short_name (which corresponds to vehicle.label)
+    const effectiveTripId =
+      systemName === "MNR" && tripInfo.trip_short_name
+        ? tripInfo.trip_short_name // Use trip_short_name as the displayed tripId for MNR
+        : staticTripId; // Use static ID for other systems
+
+    // Look up and include note text if available (mainly for MNR)
+    let noteText: string | null = null;
+    if (stopTimeInfo.noteId && staticData.notes) {
+      const note = staticData.notes.get(stopTimeInfo.noteId);
+      if (note) {
+        noteText = note.noteDesc || null;
+      }
+    }
+
+    // For static data, estimatedDepartureTime equals departureTime (no delay)
+    const departure: Departure = {
+      id: staticTripId,
+      tripId: effectiveTripId, // Use trip_short_name for MNR, static ID for others
+      routeId: actualRouteId,
+      routeShortName: routeInfo?.route_short_name || "",
+      routeLongName: routeInfo?.route_long_name || "",
+      peakStatus: peakStatus,
+      routeColor: routeInfo?.route_color || null,
+      destination: finalDestination,
+      departureTime: scheduledTime, // Use SCHEDULED Date object
+      estimatedDepartureTime: scheduledTime, // For static data, estimated = scheduled
+      delayMinutes: null, // No delay info
+      // Include track information from stop_times.txt if available
+      track: stopTimeInfo.track || undefined,
+      status: "Scheduled", // Explicitly set status
+      direction: direction,
+      destinationBorough:
+        staticData.stops.get(`${systemName}-${tripInfo.destinationStopId}`)
+          ?.borough || null,
+      system: systemName,
+      // Determine if this is a terminal arrival based on station info
+      isTerminalArrival: (() => {
+        // First, check if this is a known terminal station
+        const stopKey = `${systemName}-${platformId}`;
+        const stopInfo = staticData.stops.get(stopKey);
+
+        // Consider it a terminal if the station is marked as terminal or the direction suggests it
+        // (direction_id = 1 typically means inbound to a major terminal for commuter rail)
+        return stopInfo?.isTerminal ||
+          ((systemName === "MNR" || systemName === "LIRR") &&
+            tripInfo.direction_id === 1)
+          ? true
+          : false;
+      })(),
+      source: "scheduled",
+      // Include wheelchair accessibility information from static trip data
+      wheelchair_accessible: tripInfo.wheelchair_accessible || null,
+      // Add pickup_type, drop_off_type, and note_id from stop time info
+      pickupType: stopTimeInfo.pickupType || null,
+      dropOffType: stopTimeInfo.dropOffType || null,
+      noteId: stopTimeInfo.noteId || null,
+      noteText: noteText,
+    };
+
+    return departure;
+  } catch (error) {
+    logger.error(`Error creating scheduled departure: ${error}`);
+    return null;
+  }
+}
+
+// --- Process realtime feed entities ---
+async function processRealtimeFeedEntities(
+  decodedEntities: any[],
+  systemName: SystemType,
+  staticData: StaticData,
+  originalChildStopIds: Set<string>,
+  processedRealtimeTripIds: Set<string>,
+  now: number,
+  cutoffTime: number,
+): Promise<Departure[]> {
+  const realtimeDepartures: Departure[] = [];
+  let totalUpdatesProcessed = 0;
+
+  // --- Inside the real-time processing loop ---
+  for (const entity of decodedEntities) {
+    const trip_update = entity.trip_update;
+    const vehicle = entity.vehicle;
+
+    // Process trip_update entities (the main source of departure data)
+    if (trip_update?.stop_time_update?.length > 0) {
+      totalUpdatesProcessed++;
+      const stopTimeUpdates = trip_update.stop_time_update;
+      const rtTrip = trip_update.trip;
+
+      // 1. Get and Validate IDs
+      let tripIdFromFeed = rtTrip?.trip_id?.trim();
+      if (!tripIdFromFeed) {
+        logger.debug("[RT Skip] Entity missing trip_id.");
+        continue; // Cannot proceed without trip_id
+      }
+
+      // Normalize trip ID for better matching
+      tripIdFromFeed = normalizeTripId(tripIdFromFeed, systemName);
+
+      if (systemName === "MNR" || systemName === "LIRR") {
+        logger.debug(
+          `[Trip ID] Normalized realtime ${systemName} trip ID: ${tripIdFromFeed}`,
+        );
+      }
+
+      // Look up the static trip data using appropriate methods
+      const { staticTripInfo, effectiveTripId } = findStaticTripInfo(
+        tripIdFromFeed,
+        systemName,
+        entity,
+        staticData,
+        processedRealtimeTripIds,
+      );
+
+      if (!staticTripInfo) {
+        logger.warn(
+          `[RT Process] Static trip info not found for trip ${tripIdFromFeed}. Processing STUs without static context.`,
+        );
+
+        // For MNR, we need further investigation before rejecting trips
+        if (systemName === "MNR") {
+          // Log detailed information about this MNR trip for debugging
+          logger.info(
+            `[MNR Analysis] Trip ${tripIdFromFeed} doesn't exist in static data. Extensions available: ${Object.keys(
+              rtTrip || {},
+            )
+              .filter((k) => k.startsWith("."))
+              .join(", ")}`,
+          );
+        }
+      }
+
+      // 2. Determine Trip Direction
+      const tripDirection = determineTripDirection(
+        systemName,
+        staticTripInfo,
+        rtTrip,
+        tripIdFromFeed,
+        stopTimeUpdates,
+      );
+
+      // 3. Determine Destination
+      const { finalDestination, destinationBorough } = determineDestination(
+        systemName,
+        staticTripInfo,
+        rtTrip,
+        stopTimeUpdates,
+        staticData,
+      );
+
+      // Track processed trip to avoid duplicates in static data
+      processedRealtimeTripIds.add(tripIdFromFeed);
+
+      // 4. Loop through Stop Time Updates (STUs)
+      for (const stu of stopTimeUpdates) {
+        const stuOriginalStopId = stu.stop_id?.trim();
+
+        // Check if STU matches station
+        if (
+          !stuOriginalStopId ||
+          !originalChildStopIds.has(stuOriginalStopId)
+        ) {
+          continue;
+        }
+
+        // Check for valid future time - prioritize departures, but handle terminal stations
+        const departureTimeLong = stu.departure?.time;
+        const arrivalTimeLong = stu.arrival?.time;
+        let relevantTime: number;
+        let isTerminalArrival = false;
+
+        // First, try to use departure time if available
+        if (departureTimeLong && Number(departureTimeLong) > 0) {
+          relevantTime = Number(departureTimeLong) * 1000;
+          // This is a normal departure
+        } else if (systemName === "MNR" || systemName === "LIRR") {
+          // For commuter rail, handle terminal station arrivals
+          if (arrivalTimeLong && Number(arrivalTimeLong) > 0) {
+            relevantTime = Number(arrivalTimeLong) * 1000;
+
+            // Check if this is a terminal arrival
+            isTerminalArrival = checkIsTerminalArrival(
+              stu,
+              systemName,
+              stopTimeUpdates,
+              stuOriginalStopId,
+              staticData,
+            );
+
+            // Always include terminal arrivals
+            const includeTerminalArrivals = true;
+
+            if (!isTerminalArrival || includeTerminalArrivals) {
+              logger.debug(
+                `[MNR/LIRR] Using arrival time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed} (${isTerminalArrival ? "terminal arrival" : "non-terminal stop"})`,
+              );
+            } else {
+              logger.debug(
+                `[MNR/LIRR] Skipping terminal arrival at ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
+              );
+              continue; // Skip terminal arrivals if we don't want to include them
+            }
+          } else {
+            // No valid time at all
+            logger.debug(
+              `[RT Skip] No valid departure or arrival time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
+            );
+            continue;
+          }
+        } else {
+          // For subway, we strictly require departure times
+          logger.debug(
+            `[RT Skip] No valid departure time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
+          );
+          continue;
+        }
+
+        // Check if time is within our window
+        const isTimeValid =
+          relevantTime >= now - 60000 && relevantTime <= cutoffTime;
+        if (!isTimeValid) {
+          logger.debug(
+            `[RT Skip] Time ${new Date(relevantTime).toISOString()} for stop ${stuOriginalStopId} on trip ${tripIdFromFeed} out of window.`,
+          );
+          continue;
+        }
+
+        // Extract track information
+        const track = extractTrackInfo(stu, systemName, originalChildStopIds);
+
+        // 5. Create Departure Object
+        const departure = createRealtimeDeparture(
+          rtTrip,
+          stu,
+          entity,
+          systemName,
+          staticData,
+          staticTripInfo,
+          effectiveTripId,
+          tripDirection,
+          finalDestination,
+          destinationBorough,
+          relevantTime,
+          isTerminalArrival,
+          track,
+          now,
+          originalChildStopIds,
+        );
+
+        if (departure) {
+          realtimeDepartures.push(departure);
+        }
+      } // End STU loop
+    } // End if trip_update has STUs
+
+    // Process vehicle entities to use vehicleTripId (vehicle.id/label) for MNR trip lookups
+    // For MNR trips, the vehicle.id/label should be used to find the corresponding trip_id
+    if (
+      systemName === "MNR" &&
+      vehicle?.trip?.trip_id &&
+      vehicle.vehicle?.label
+    ) {
+      const vehicleLabel = vehicle.vehicle.label.trim();
+      // Add vehicleLabel to processedRealtimeTripIds to ensure we don't duplicate this trip from static data
+      processedRealtimeTripIds.add(vehicleLabel);
+    }
+  } // End entity loop
+
+  return realtimeDepartures;
+}
+
+// --- Process static schedule data for a station ---
+async function processStaticScheduleData(
+  systemName: SystemType,
+  originalChildStopIds: Set<string>,
+  staticData: StaticData,
+  processedRealtimeTripIds: Set<string>,
+  now: number,
+  cutoffTime: number,
+  todayStr: string,
+): Promise<Departure[]> {
+  const scheduledDepartures: Departure[] = [];
+  let addedScheduled = 0;
+
+  try {
+    const activeServices = await getActiveServicesForToday(); // Get today's active service IDs
+    logger.debug(
+      `[Static Fallback ${systemName}] Found ${activeServices.size} active services today.`,
+    );
+
+    // Iterate through the station's platforms (original IDs)
+    for (const platformId of originalChildStopIds) {
+      const tripsStoppingAtPlatform =
+        staticData.stopTimeLookup?.get(platformId);
+
+      if (!tripsStoppingAtPlatform) {
+        logger.debug(
+          `[Static Fallback] No trips found for platform ${platformId}`,
+        );
+        continue;
+      }
+
+      logger.debug(
+        `[Static Fallback] Found ${tripsStoppingAtPlatform.size} trips for platform ${platformId}`,
+      );
+
+      // Iterate through static trips scheduled to stop at this platform
+      for (const [
+        staticTripId,
+        stopTimeInfo,
+      ] of tripsStoppingAtPlatform.entries()) {
+        // Skip if this trip was ALREADY processed via real-time feed
+        let normalizedStaticTripId = normalizeTripId(staticTripId, systemName);
+
+        if (normalizedStaticTripId !== staticTripId) {
+          logger.debug(
+            `[Trip ID] Normalized static ${systemName} trip ID: ${staticTripId} -> ${normalizedStaticTripId}`,
+          );
+        }
+
+        // Check if trip should be skipped (already in realtime data)
+        let shouldSkip = processedRealtimeTripIds.has(normalizedStaticTripId);
+
+        if (!shouldSkip && systemName === "MNR") {
+          // Check MNR-specific case using trip_short_name
+          const tripWithShortName = staticData.trips.get(staticTripId);
+          if (
+            tripWithShortName?.trip_short_name &&
+            processedRealtimeTripIds.has(tripWithShortName.trip_short_name)
+          ) {
+            shouldSkip = true;
+            logger.silly(
+              `[Static Skip] MNR Trip ${staticTripId} with short_name ${tripWithShortName.trip_short_name} already processed in realtime feed`,
+            );
+          }
+        }
+
+        if (shouldSkip) {
+          logger.debug(
+            `[Static Skip] Trip ${staticTripId} already processed in realtime feed`,
+          );
+          continue;
+        }
+
+        // Get static trip details
+        const tripInfo = staticData.trips.get(staticTripId);
+
+        // Ensure trip exists, matches the system, and has an active service ID
+        if (
+          !tripInfo ||
+          tripInfo.system !== systemName ||
+          !tripInfo.service_id ||
+          !activeServices.has(tripInfo.service_id)
+        ) {
+          if (!tripInfo) {
+            logger.silly(
+              ` -> SKIP ${staticTripId}: Not found in staticData.trips map.`,
+            );
+          } else if (tripInfo.system !== systemName) {
+            logger.silly(
+              `-> SKIP ${staticTripId}: System mismatch (${tripInfo.system} != ${systemName}).`,
+            );
+          } else if (!tripInfo.service_id) {
+            logger.silly(
+              `-> SKIP ${staticTripId}: Missing service_id in tripInfo.`,
+            );
+          } else if (!activeServices.has(tripInfo.service_id)) {
+            logger.silly(
+              `-> SKIP ${staticTripId}: Service ID [${tripInfo.service_id}] not found in active list.`,
+            );
+          }
+          continue; // Skip this trip
+        }
+
+        // Get scheduled time (prioritize departure)
+        const scheduledTimeStr =
+          stopTimeInfo.scheduledDepartureTime ||
+          stopTimeInfo.scheduledArrivalTime;
+        if (!scheduledTimeStr) continue;
+
+        // Check pickup type - if pickup is not allowed (type = 1), skip this stop time
+        if (stopTimeInfo.pickupType === 1) {
+          logger.debug(
+            `[Static Skip] Trip ${staticTripId} at stop ${platformId} has pickup_type=1 (no pickup allowed), skipping`,
+          );
+          continue;
+        }
+
+        // Construct Date object for scheduled time today
+        let scheduledTime: Date | null = null;
+        try {
+          // Handle times > 24:00:00 if necessary
+          let hours = parseInt(scheduledTimeStr.substring(0, 2), 10);
+          let parseDateStr = todayStr;
+          const adjustedHour = hours % 24;
+          let parseTimeStr = scheduledTimeStr;
+
+          if (!isNaN(hours) && hours >= 24) {
+            // Time is on the next day
+            const nextDay = new Date(now + 24 * 60 * 60 * 1000);
+            parseDateStr = format(nextDay, "yyyy-MM-dd");
+            // Adjust time string for parsing
+            parseTimeStr = `${String(adjustedHour).padStart(2, "0")}:${scheduledTimeStr.substring(3)}`;
+          }
+
+          // Parse the date
+          scheduledTime = dateParse(
+            `${parseDateStr} ${parseTimeStr}`,
+            "yyyy-MM-dd HH:mm:ss",
+            new Date(),
+          );
+        } catch (parseError) {
+          logger.error(
+            `[Static Fallback] Error parsing time ${scheduledTimeStr}:`,
+            parseError,
+          );
+          continue;
+        }
+
+        // Check if scheduled time is valid and in the future window
+        const relevantTime = scheduledTime?.getTime();
+        if (
+          relevantTime === null ||
+          isNaN(relevantTime) ||
+          relevantTime < now - 60000 ||
+          relevantTime > cutoffTime
+        ) {
+          if (relevantTime) {
+            logger.debug(
+              `-> Skipping scheduled ${staticTripId}, time ${new Date(relevantTime).toISOString()} out of window`,
+            );
+          }
+          continue;
+        }
+
+        // Create the scheduled departure
+        const departure = createScheduledDeparture(
+          staticTripId,
+          tripInfo,
+          stopTimeInfo,
+          platformId,
+          systemName,
+          staticData,
+          scheduledTime,
+        );
+
+        if (departure) {
+          scheduledDepartures.push(departure);
+          addedScheduled++;
+        }
+      } // End loop tripsStoppingHere
+    } // End loop platformId
+
+    logger.debug(
+      `[Departures] Added ${addedScheduled} scheduled departures via static fallback for ${systemName}.`,
+    );
+
+    return scheduledDepartures;
+  } catch (fallbackError) {
+    logger.error(
+      `[Departures] Error during static fallback for ${systemName}:`,
+      fallbackError,
+    );
+    return [];
+  }
+}
+
+// --- Main Function: Get Departures For Station ---
 export async function getDeparturesForStation(
   requestedUniqueStationId: string, // e.g., "SUBWAY-L11" or "LIRR-237"
   limitMinutes?: number,
   sourceFilter?: DepartureSource, // Optional filter for realtime or scheduled departures
 ): Promise<Departure[]> {
+  // --- 1. Initialize and load static data ---
   let staticData: StaticData;
   try {
-    staticData = getStaticData(); // Must be loaded successfully first
+    staticData = getStaticData();
   } catch (err) {
     logger.error("[Departures] Static data not available:", err);
     return [];
   }
 
-  const requestedStationInfo = staticData.stops.get(requestedUniqueStationId); // Lookup by unique key
+  // --- 2. Get station info and validate ---
+  const requestedStationInfo = staticData.stops.get(requestedUniqueStationId);
   const stationName = requestedStationInfo?.name || "(Unknown)";
 
   analyticsService.trackStationLookup(
@@ -198,10 +1537,11 @@ export async function getDeparturesForStation(
     return [];
   }
 
-  // Get ORIGINAL Child Stop IDs (like "L11N", "128S", etc.)
+  // --- 3. Get Child Stop IDs ---
   const originalChildStopIds = new Set<string>(
     requestedStationInfo.childStopIds,
   );
+
   // If no children, use the station's own ORIGINAL stop ID for matching STUs
   if (originalChildStopIds.size === 0) {
     if (requestedStationInfo.originalStopId) {
@@ -217,9 +1557,8 @@ export async function getDeparturesForStation(
     }
   }
 
+  // --- 4. Get feed URLs and prepare for fetching ---
   const feedUrlsToFetch = Array.from(requestedStationInfo.feedUrls);
-  // Note: For LIRR/MNR, feedUrlsToFetch might be empty but we'll still run static fallback
-  // if there are no feeds to fetch
 
   logger.debug(
     `[Departures] Fetching for ${
@@ -229,1218 +1568,88 @@ export async function getDeparturesForStation(
     ).join(", ")}] from feeds: ${feedUrlsToFetch.join(", ") || "None"}`,
   );
 
-  // Fetch feeds in parallel, keeping track of source URL
+  // --- 5. Fetch feeds in parallel ---
   const feedPromises = feedUrlsToFetch.map(async (url) => {
     const feedName = `feed_${url.split("/").pop()}`;
     const result = await fetchAndParseFeed(url, feedName);
     return { url, result };
   });
 
-  const realtimeDepartures: Departure[] = []; // Store RT departures separately
-  const scheduledDepartures: Departure[] = []; // Store scheduled departures separately
-  const processedRealtimeTripIds = new Set<string>(); // Track trips found in RT feed
+  // --- 6. Initialize data structures ---
+  const realtimeDepartures: Departure[] = [];
+  const scheduledDepartures: Departure[] = [];
+  const processedRealtimeTripIds = new Set<string>();
   const now = Date.now();
-  const todayStr = format(new Date(now), "yyyy-MM-dd"); // Use date-fns format
+  const todayStr = format(new Date(now), "yyyy-MM-dd");
   const cutoffTime =
     limitMinutes && limitMinutes > 0
       ? now + limitMinutes * 60 * 1000
       : Infinity;
   let totalEntitiesFetched = 0;
-  let totalUpdatesProcessed = 0;
-  let totalDeparturesCreated = 0;
 
   try {
+    // --- 7. Process realtime feeds ---
     const feedFetchResults = await Promise.all(feedPromises);
-
     logger.info(
       `[Departures] Processing results for ${feedFetchResults.length} fetched feeds...`,
     );
+
     for (const { url: feedUrl, result: fetchedData } of feedFetchResults) {
       if (!fetchedData?.message?.entity) {
         logger.warn(`-> Skipping feed ${feedUrl}: No valid data returned.`);
-        continue; // Skip empty/failed feeds
+        continue;
       }
 
       const decodedEntities = fetchedData.message.entity;
       totalEntitiesFetched += decodedEntities.length;
 
-      // Determine System for this specific feed's data
-      let systemName: SystemType | null = null;
-      if (feedUrl === LIRR_FEED) systemName = "LIRR";
-      else if (feedUrl === MNR_FEED) systemName = "MNR";
-      else {
-        for (const key in SUBWAY_FEEDS) {
-          if (SUBWAY_FEEDS[key as keyof typeof SUBWAY_FEEDS] === feedUrl) {
-            systemName = "SUBWAY";
-            break;
-          }
-        }
-      }
-
+      // Determine system for this feed
+      const systemName = getSystemFromFeedUrl(feedUrl);
       if (!systemName) {
         logger.warn(`-> Could not determine system for ${feedUrl}. Skipping.`);
         continue;
       }
+
       logger.debug(`-> Processing feed for System: ${systemName}`);
 
-      // --- Inside the real-time processing loop ---
-      for (const entity of decodedEntities) {
-        const trip_update = entity.trip_update;
-        const vehicle = entity.vehicle;
-
-        // Process trip_update entities (the main source of departure data)
-        if (trip_update?.stop_time_update?.length > 0) {
-          totalUpdatesProcessed++;
-          const stopTimeUpdates = trip_update.stop_time_update;
-          const rtTrip = trip_update.trip;
-
-          // --- 1. Get and Validate IDs ---
-          let tripIdFromFeed = rtTrip?.trip_id?.trim();
-          if (!tripIdFromFeed) {
-            logger.debug("[RT Skip] Entity missing trip_id.");
-            continue; // Cannot proceed without trip_id
-          }
-
-          // Normalize MNR/LIRR trip IDs for proper matching with static data
-          // This helps avoid duplicates caused by different ID formats
-          if (systemName === "MNR" || systemName === "LIRR") {
-            // Log original ID for debugging
-            logger.debug(
-              `[Trip ID] Original realtime MNR/LIRR trip ID: ${tripIdFromFeed}`,
-            );
-
-            // Try to normalize the trip ID to match static data format
-            // Remove any leading zeros that might be in static data but not realtime
-            tripIdFromFeed = tripIdFromFeed.replace(/^0+/, "");
-
-            logger.debug(
-              `[Trip ID] Normalized realtime MNR/LIRR trip ID: ${tripIdFromFeed}`,
-            );
-          }
-
-          // Look up the static trip data using appropriate methods for each system
-          let staticTripInfo = null;
-
-          if (systemName === "MNR") {
-            // For MNR, need to use vehicleTripId (vehicle.vehicle.label) for lookup, not trip_id in the feed
-            // This is because MNR trip_id in realtime feed doesn't directly match static trip_id
-            const vehicleLabel = entity.vehicle?.vehicle?.label?.trim();
-            if (vehicleLabel) {
-              // Use vehicleLabel to look up the actual trip_id via vehicleTripsMap or tripsByShortName
-              const staticTripId =
-                staticData.vehicleTripsMap?.get(vehicleLabel) ||
-                staticData.tripsByShortName?.get(vehicleLabel);
-              if (staticTripId) {
-                staticTripInfo = staticData.trips.get(staticTripId);
-                logger.debug(
-                  `[MNR Trip] Found static trip using vehicle label ${vehicleLabel}: ${staticTripId}`,
-                );
-
-                // Track the vehicle label as a processed trip to avoid duplicates from static data
-                processedRealtimeTripIds.add(vehicleLabel);
-              }
-            } else {
-              // Fallback to the old method if vehicle label isn't available
-              // Use the tripsByShortName lookup map to find the static trip_id
-              const staticTripId =
-                staticData.tripsByShortName?.get(tripIdFromFeed);
-              if (staticTripId) {
-                staticTripInfo = staticData.trips.get(staticTripId);
-              }
-            }
-
-            if (!staticTripInfo) {
-              // If no match by vehicle label or trip_short_name, try direct trip_id lookup as last resort
-              staticTripInfo = staticData.trips.get(tripIdFromFeed);
-            }
-          } else {
-            // For LIRR and other systems, we can use the trip_id directly
-            staticTripInfo = staticData.trips.get(tripIdFromFeed);
-          }
-          if (!staticTripInfo) {
-            logger.warn(
-              `[RT Process] Static trip info not found for trip ${tripIdFromFeed}. Processing STUs without static context.`,
-            );
-
-            // For MNR, we need further investigation before rejecting trips
-            // For now, just log this for analysis but don't filter
-            if (systemName === "MNR") {
-              // Log detailed information about this MNR trip for debugging
-              logger.info(
-                `[MNR Analysis] Trip ${tripIdFromFeed} doesn't exist in static data. Extensions available: ${Object.keys(
-                  rtTrip || {},
-                )
-                  .filter((k) => k.startsWith("."))
-                  .join(", ")}`,
-              );
-
-              // Do NOT skip for now - we need to analyze the data first
-              // continue;
-            }
-            // For other systems, we'll proceed with limited info (for backward compatibility)
-            // continue; // Option: Skip entirely if static data is essential
-          }
-
-          // --- 2. Determine Trip Direction (Once per Trip Update) ---
-          let tripDirection: Direction = "Unknown";
-
-          // Special case for MNR - prioritize static data for accuracy, but have fallbacks
-          if (systemName === "MNR") {
-            // For MNR, first check the static data (most reliable source when available)
-            // Log ALL direction info attempts for MNR to diagnose "Unknown" direction issue
-            logger.debug(
-              `[MNR Direction Debug] Trip ${tripIdFromFeed} static data check: hasStaticTripInfo=${!!staticTripInfo}, direction_id=${staticTripInfo?.direction_id}`,
-            );
-
-            if (staticTripInfo?.direction_id != null) {
-              const dirId = staticTripInfo.direction_id;
-              if (dirId === 0) {
-                tripDirection = "Outbound";
-                logger.debug(
-                  `[MNR Direction] Trip ${tripIdFromFeed} direction from static data: Outbound (direction_id: 0)`,
-                );
-              } else if (dirId === 1) {
-                tripDirection = "Inbound";
-                logger.debug(
-                  `[MNR Direction] Trip ${tripIdFromFeed} direction from static data: Inbound (direction_id: 1)`,
-                );
-              } else {
-                // Log unexpected direction_id values
-                logger.warn(
-                  `[MNR Direction] Trip ${tripIdFromFeed} has unusual direction_id value: ${dirId}`,
-                );
-              }
-            } else if (staticTripInfo) {
-              logger.warn(
-                `[MNR Direction] Trip ${tripIdFromFeed} has matched static data but direction_id is null or undefined`,
-              );
-            }
-
-            // If static data didn't provide direction, infer from stop sequence
-            if (tripDirection === "Unknown" && stopTimeUpdates.length > 0) {
-              // Find the first and last stop in sequence
-              let firstStop = stopTimeUpdates[0];
-              let lastStop = stopTimeUpdates[0];
-              let minSequence = Number(firstStop.stop_sequence) || 0;
-              let maxSequence = Number(lastStop.stop_sequence) || 0;
-
-              for (let i = 1; i < stopTimeUpdates.length; i++) {
-                const currentSequence =
-                  Number(stopTimeUpdates[i].stop_sequence) || 0;
-                if (currentSequence < minSequence) {
-                  minSequence = currentSequence;
-                  firstStop = stopTimeUpdates[i];
-                }
-                if (currentSequence > maxSequence) {
-                  maxSequence = currentSequence;
-                  lastStop = stopTimeUpdates[i];
-                }
-              }
-
-              // Grand Central is stop_id 1
-              const firstStopId = firstStop.stop_id?.trim();
-              const lastStopId = lastStop.stop_id?.trim();
-
-              if (lastStopId === "1") {
-                // If train ends at Grand Central, it's inbound
-                tripDirection = "Inbound";
-                logger.debug(
-                  `[MNR Direction] Trip ${tripIdFromFeed} determined as Inbound (ends at Grand Central)`,
-                );
-              } else if (firstStopId === "1") {
-                // If train starts at Grand Central, it's outbound
-                tripDirection = "Outbound";
-                logger.debug(
-                  `[MNR Direction] Trip ${tripIdFromFeed} determined as Outbound (starts at Grand Central)`,
-                );
-              }
-            }
-
-            // Log if we still don't have a direction
-            if (tripDirection === "Unknown") {
-              logger.warn(
-                `[MNR Direction] Unable to determine direction for trip ${tripIdFromFeed}`,
-              );
-            }
-          } else if (staticTripInfo) {
-            // For other systems, use static info if available
-            if (systemName === "LIRR") {
-              if (staticTripInfo.direction_id != null) {
-                const dirId = staticTripInfo.direction_id;
-                if (dirId === 0) tripDirection = "Outbound";
-                else if (dirId === 1) tripDirection = "Inbound";
-              }
-            } else if (systemName === "SUBWAY") {
-              const nyctTripExt =
-                rtTrip?.[".transit_realtime.nyct_trip_descriptor"];
-              if (nyctTripExt?.direction === 1) tripDirection = "N";
-              else if (nyctTripExt?.direction === 3) tripDirection = "S";
-              // Add static fallback for Subway if needed
-            }
-          }
-          // Note: Direction remains 'Unknown' if direction couldn't be determined
-
-          // --- 3. Determine Destination (using different prioritization for MNR vs other systems) ---
-          let finalDestination = "Unknown Destination";
-          let destinationBorough: string | null = null;
-          let destSource = "Unknown"; // For debugging purposes
-
-          // For MNR trains, prioritize static trip data headsign first since we now have accurate mapping
-          if (systemName === "MNR" && staticTripInfo) {
-            // --- MNR Method 1: Try trip_headsign from static data first (most reliable for MNR) ---
-            if (staticTripInfo.trip_headsign) {
-              destSource = "Trip Headsign";
-              finalDestination = staticTripInfo.trip_headsign;
-              logger.debug(
-                `[MNR Destination] Set from trip_headsign: ${finalDestination}`,
-              );
-            }
-            // --- MNR Method 2: Try static destination stop ID if headsign not available ---
-            else if (staticTripInfo.destinationStopId) {
-              destSource = "Static DestinationStopId";
-              const staticDestKey = `${staticTripInfo.system}-${staticTripInfo.destinationStopId}`;
-              const staticDestStop = staticData.stops.get(staticDestKey);
-
-              if (staticDestStop) {
-                finalDestination = staticDestStop.name;
-                destinationBorough = staticDestStop.borough || null;
-                logger.debug(
-                  `[MNR Destination] Set from static destinationStopId: ${finalDestination} (${staticDestKey})`,
-                );
-              }
-            }
-            // --- MNR Method 3: Fall back to last stop in sequence ---
-            else if (stopTimeUpdates.length > 0) {
-              destSource = "Last Stop Calculation";
-              // Find the stop time update with the maximum sequence number
-              let lastStopUpdate = stopTimeUpdates[0];
-              let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
-
-              for (let i = 1; i < stopTimeUpdates.length; i++) {
-                const currentSequence =
-                  Number(stopTimeUpdates[i].stop_sequence) || 0;
-                if (currentSequence > maxSequence) {
-                  maxSequence = currentSequence;
-                  lastStopUpdate = stopTimeUpdates[i];
-                }
-              }
-
-              const lastStopId = lastStopUpdate?.stop_id?.trim();
-              if (lastStopId) {
-                // Construct the unique key for the destination stop
-                const destStopKey = `${systemName}-${lastStopId}`;
-                const destStopInfo = staticData.stops.get(destStopKey);
-
-                if (destStopInfo) {
-                  finalDestination = destStopInfo.name;
-                  destinationBorough = destStopInfo.borough || null;
-                  destSource = "Last Stop Name";
-                  logger.debug(
-                    `[MNR Destination] Set from last stop: ${finalDestination} (${destStopKey})`,
-                  );
-                }
-              }
-            }
-          } else {
-            // --- For non-MNR systems, keep existing priority order ---
-
-            // --- Method 1: If we have stop time updates, find the last stop in sequence ---
-            if (stopTimeUpdates.length > 0) {
-              destSource = "Last Stop Calculation";
-              // Find the stop time update with the maximum sequence number
-              let lastStopUpdate = stopTimeUpdates[0];
-              let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
-
-              for (let i = 1; i < stopTimeUpdates.length; i++) {
-                const currentSequence =
-                  Number(stopTimeUpdates[i].stop_sequence) || 0;
-                if (currentSequence > maxSequence) {
-                  maxSequence = currentSequence;
-                  lastStopUpdate = stopTimeUpdates[i];
-                }
-              }
-
-              const lastStopId = lastStopUpdate?.stop_id?.trim();
-              if (lastStopId && systemName) {
-                // Construct the unique key for the destination stop
-                const destStopKey = `${systemName}-${lastStopId}`;
-                const destStopInfo = staticData.stops.get(destStopKey);
-
-                if (destStopInfo) {
-                  finalDestination = destStopInfo.name;
-                  destinationBorough = destStopInfo.borough || null;
-                  destSource = "Last Stop Name";
-                  logger.debug(
-                    `[Destination] Set from last stop: ${finalDestination} (${destStopKey})`,
-                  );
-                } else {
-                  logger.debug(
-                    `[Destination] Failed lookup for last stop key: ${destStopKey}`,
-                  );
-                }
-              }
-            }
-
-            // --- Method 2: Try static destination stop ID if method 1 failed ---
-            if (
-              finalDestination === "Unknown Destination" &&
-              staticTripInfo?.destinationStopId &&
-              staticTripInfo.system
-            ) {
-              destSource = "Static DestinationStopId";
-              const staticDestKey = `${staticTripInfo.system}-${staticTripInfo.destinationStopId}`;
-              const staticDestStop = staticData.stops.get(staticDestKey);
-
-              if (staticDestStop) {
-                finalDestination = staticDestStop.name;
-                destinationBorough = staticDestStop.borough || null;
-                logger.debug(
-                  `[Destination] Set from static destinationStopId: ${finalDestination} (${staticDestKey})`,
-                );
-              } else {
-                logger.debug(
-                  `[Destination] Failed lookup for static destination stop key: ${staticDestKey}`,
-                );
-              }
-            }
-
-            // --- Method 3: Fallback to trip_headsign if methods 1 & 2 failed ---
-            if (
-              finalDestination === "Unknown Destination" &&
-              staticTripInfo?.trip_headsign
-            ) {
-              destSource = "Trip Headsign";
-              finalDestination = staticTripInfo.trip_headsign;
-              logger.debug(
-                `[Destination] Set from trip_headsign: ${finalDestination}`,
-              );
-            }
-          }
-
-          // --- Method 4: Last resort for all systems - try route's long name ---
-          if (
-            finalDestination === "Unknown Destination" &&
-            rtTrip?.route_id &&
-            systemName
-          ) {
-            destSource = "Route Long Name";
-            const routeKey = `${systemName}-${rtTrip.route_id}`;
-            const routeInfo = staticData.routes.get(routeKey);
-
-            if (routeInfo?.route_long_name) {
-              finalDestination = routeInfo.route_long_name;
-              logger.debug(
-                `[Destination] Set from route_long_name: ${finalDestination}`,
-              );
-            }
-          }
-
-          if (finalDestination === "Unknown Destination") {
-            logger.warn(
-              `[Destination] Could not determine destination for trip ${tripIdFromFeed}`,
-            );
-          }
-
-          processedRealtimeTripIds.add(tripIdFromFeed); // Track processed trip
-
-          // --- 4. Loop through Stop Time Updates (STUs) ---
-          for (const stu of stopTimeUpdates) {
-            const stuOriginalStopId = stu.stop_id?.trim();
-
-            // Check if STU matches station
-            if (
-              !stuOriginalStopId ||
-              !originalChildStopIds.has(stuOriginalStopId)
-            ) {
-              continue;
-            }
-
-            // Check for valid future time - prioritize departures, but handle terminal stations
-            const departureTimeLong = stu.departure?.time;
-            const arrivalTimeLong = stu.arrival?.time;
-            let relevantTime: number;
-            let isTerminalArrival = false;
-
-            // First, try to use departure time if available
-            if (departureTimeLong && Number(departureTimeLong) > 0) {
-              relevantTime = Number(departureTimeLong) * 1000;
-              // This is a normal departure
-            } else if (systemName === "MNR" || systemName === "LIRR") {
-              // For commuter rail, handle terminal station arrivals
-              if (arrivalTimeLong && Number(arrivalTimeLong) > 0) {
-                relevantTime = Number(arrivalTimeLong) * 1000;
-
-                // Check if this is the last stop of the trip
-                let isLastStop = false;
-                if (stopTimeUpdates.length > 0) {
-                  const thisSeq = Number(stu.stop_sequence) || 0;
-                  // Using explicit typing for the callback
-                  isLastStop = stopTimeUpdates.every(
-                    (otherStu: { stop_sequence?: string | number }) => {
-                      const otherSeq = Number(otherStu.stop_sequence) || 0;
-                      return otherSeq <= thisSeq;
-                    },
-                  );
-                }
-
-                // For MNR and LIRR, we need additional checks to identify terminal arrivals
-                if (systemName === "MNR" || systemName === "LIRR") {
-                  // Get the unique stop key for this system and stop ID
-                  const stopKey = `${systemName}-${stuOriginalStopId}`;
-                  // Look up stop info to check if it's a terminal station
-                  const stopInfo = staticData.stops.get(stopKey);
-                  const isTerminalStation = stopInfo?.isTerminal || false;
-
-                  // If this is a known terminal station or the last stop of the trip
-                  if (isTerminalStation || isLastStop) {
-                    isTerminalArrival = true;
-                    logger.debug(
-                      `[${systemName} Terminal] Identified terminal arrival at ${stuOriginalStopId} (${stopInfo?.name || "Unknown"}) ` +
-                        `for trip ${tripIdFromFeed} (isTerminalStation: ${isTerminalStation}, isLastStop: ${isLastStop})`,
-                    );
-                  }
-                } else if (isLastStop) {
-                  // For other systems, just use the last stop check
-                  isTerminalArrival = true;
-                }
-
-                // Always include terminal arrivals now (changed from false to true)
-                const includeTerminalArrivals = true;
-
-                if (!isTerminalArrival || includeTerminalArrivals) {
-                  logger.debug(
-                    `[MNR/LIRR] Using arrival time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed} (${isTerminalArrival ? "terminal arrival" : "non-terminal stop"})`,
-                  );
-                } else {
-                  logger.debug(
-                    `[MNR/LIRR] Skipping terminal arrival at ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
-                  );
-                  continue; // Skip terminal arrivals if we don't want to include them
-                }
-              } else {
-                // No valid time at all
-                logger.debug(
-                  `[RT Skip] No valid departure or arrival time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
-                );
-                continue;
-              }
-            } else {
-              // For subway, we strictly require departure times
-              logger.debug(
-                `[RT Skip] No valid departure time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
-              );
-              continue;
-            }
-
-            // Check if time is within our window
-            const isTimeValid =
-              relevantTime >= now - 60000 && relevantTime <= cutoffTime;
-            if (!isTimeValid) {
-              logger.debug(
-                `[RT Skip] Time ${new Date(relevantTime).toISOString()} for stop ${stuOriginalStopId} on trip ${tripIdFromFeed} out of window.`,
-              );
-              continue;
-            }
-
-            // --- 5. Create Departure Object ---
-            try {
-              // Gather details from STU (track, delay, status)
-              // Get peak status from staticTripInfo
-              // Get route info
-
-              const hasRealtimePrediction = true;
-              // --- Route Info Lookup ---
-              const actualRouteId = rtTrip?.route_id?.trim();
-              let routeInfo: StaticRouteInfo | undefined | null = null;
-
-              if (actualRouteId && systemName) {
-                const routeMapKey = `${systemName}-${actualRouteId}`;
-                routeInfo = staticData.routes.get(routeMapKey);
-                if (!routeInfo)
-                  logger.debug(
-                    `[Route Lookup] Failed for key: "${routeMapKey}"`,
-                  );
-              }
-
-              // --- Direction ---
-              const direction = tripDirection;
-
-              // --- Track ---
-              // Get extensions appropriate to the system type
-              const mtarrExtension =
-                systemName === "LIRR" || systemName === "MNR"
-                  ? stu[".transit_realtime.mta_railroad_stop_time_update"]
-                  : null;
-
-              const nyctExtension =
-                systemName === "SUBWAY"
-                  ? stu[".transit_realtime.nyct_stop_time_update"]
-                  : null;
-
-              // Determine track from available sources
-              let track: string | undefined;
-
-              // For LIRR, use ONLY the mtarrExtension track - we need to check the current stop ID
-              if (systemName === "LIRR") {
-                // Check if this is the stop time update for the current station
-                // (the one that matches the requested station's stop ID)
-                const isForCurrentStation = originalChildStopIds.has(
-                  stu.stop_id,
-                );
-
-                // If it's for the current station and has the MTARR extension, extract track info
-                if (mtarrExtension && isForCurrentStation) {
-                  // Always try to extract track information regardless of any other factors
-                  if (
-                    mtarrExtension.track &&
-                    mtarrExtension.track.trim() !== ""
-                  ) {
-                    track = mtarrExtension.track;
-                    logger.debug(
-                      `[LIRR Track] Got track from MTARR extension: ${track} for stop ${stu.stop_id} in trip ${tripIdFromFeed}`,
-                    );
-                  }
-                }
-              }
-              // For MNR, use the mtarrExtension track similarly to LIRR
-              else if (systemName === "MNR") {
-                // Check if this is the stop time update for the current station
-                const isForCurrentStation = originalChildStopIds.has(
-                  stu.stop_id,
-                );
-
-                // If it's for the current station and has the MTARR extension, extract track info
-                if (
-                  mtarrExtension &&
-                  isForCurrentStation &&
-                  mtarrExtension.track
-                ) {
-                  if (mtarrExtension.track.trim() !== "") {
-                    track = mtarrExtension.track;
-                    logger.debug(
-                      `[MNR Track] Got track from MTARR extension: ${track} for stop ${stu.stop_id} in trip ${tripIdFromFeed}`,
-                    );
-                  }
-                }
-              }
-              // For Subway, use the nyctExtension
-              else if (systemName === "SUBWAY" && nyctExtension) {
-                track = nyctExtension.actualTrack;
-              }
-
-              // Fallbacks for MNR and Subway only (not for LIRR)
-              if (!track && systemName !== "LIRR") {
-                track = stu.departure?.track || stu.arrival?.track || undefined;
-              }
-
-              // Flag suspicious MNR trains (heuristic approach)
-              let isSuspiciousTrip = false;
-
-              if (systemName === "MNR") {
-                // Log sources for debugging
-                if (
-                  mtarrExtension ||
-                  stu.departure?.track ||
-                  stu.arrival?.track
-                ) {
-                  logger.debug(
-                    `[MNR Track] Trip ${tripIdFromFeed}, sources: MTARR=${!!mtarrExtension}, departure=${!!stu.departure?.track}, arrival=${!!stu.arrival?.track}, final=${track}`,
-                  );
-                }
-              }
-              // --- End Track ---
-
-              // --- Delay ---
-              const delaySecs = hasRealtimePrediction
-                ? (stu.departure?.delay ?? stu.arrival?.delay)
-                : null;
-              const delayMinutes =
-                delaySecs != null ? Math.round(delaySecs / 60) : null;
-              // --- End Delay ---
-
-              // --- Status ---
-              let status = "Scheduled";
-              if (hasRealtimePrediction && relevantTime) {
-                // Status based on RT prediction
-                if (delayMinutes != null) {
-                  if (delayMinutes > 1) status = `Delayed ${delayMinutes} min`;
-                  else if (delayMinutes < -1)
-                    status = `Early ${Math.abs(delayMinutes)} min`;
-                  else status = "On Time";
-                } else {
-                  // Proximity if no delay but RT time exists
-                  const diffMillis = relevantTime - now;
-                  if (diffMillis < 120000 && diffMillis >= 30000)
-                    status = "Approaching";
-                  else if (diffMillis < 30000 && diffMillis >= -30000)
-                    status = "Due";
-                  // else remains "Scheduled" even with RT time if far out
-                }
-
-                // ---  Determine Peak Status
-                const peakStatus = getPeakStatus(staticTripInfo?.peak_offpeak);
-
-                // Log peak status for MNR trains (to help verify correct data flow)
-                if (systemName === "MNR" && staticTripInfo?.peak_offpeak) {
-                  logger.debug(
-                    `[MNR Peak Status] Trip ${tripIdFromFeed} has peak_offpeak=${staticTripInfo.peak_offpeak}, parsed as ${peakStatus || "null"}`,
-                  );
-                }
-
-                // Create the scheduled departureTime
-                const scheduledTime = relevantTime
-                  ? new Date(relevantTime)
-                  : null;
-
-                // Calculate the estimatedDepartureTime based on delays
-                let estimatedTime: Date | null = null;
-                if (scheduledTime && delayMinutes !== null) {
-                  estimatedTime = new Date(
-                    scheduledTime.getTime() + delayMinutes * 60 * 1000,
-                  );
-                } else {
-                  estimatedTime = scheduledTime; // If no delay, estimated = scheduled
-                }
-
-                // For MNR trips only, use the vehicle label as the tripId if available
-                // For LIRR, the trip_id in the feed is reliable and doesn't need mapping
-                const mnrVehicleLabel =
-                  systemName === "MNR"
-                    ? entity.vehicle?.vehicle?.label?.trim()
-                    : null;
-                const effectiveTripId =
-                  systemName === "MNR" && mnrVehicleLabel
-                    ? mnrVehicleLabel
-                    : tripIdFromFeed;
-
-                // Extract trainStatus from MTA railroad extensions if available for MNR and LIRR
-                let trainStatus: string | null = null;
-
-                // Get MTA railroad extensions if available
-                const mtarrExtension =
-                  stu[".transit_realtime.mta_railroad_stop_time_update"];
-                if (
-                  (systemName === "MNR" || systemName === "LIRR") &&
-                  mtarrExtension &&
-                  mtarrExtension.trainStatus
-                ) {
-                  // Only use non-empty trainStatus values
-                  if (
-                    mtarrExtension.trainStatus &&
-                    mtarrExtension.trainStatus.trim() !== ""
-                  ) {
-                    trainStatus = mtarrExtension.trainStatus;
-                  }
-                }
-
-                // Get stop time info for pickup/dropoff details if available
-                // - For MNR: Try multiple approaches due to ID mapping challenges
-                // - For LIRR and other systems: Use tripIdFromFeed directly
-
-                const stopTimesForStop = staticData.stopTimeLookup.get(
-                  stu.stop_id,
-                );
-                let staticStopTimeInfo: StaticStopTimeInfo | null = null;
-
-                if (!stopTimesForStop) {
-                  logger.debug(
-                    `[Stop Time Debug] No stop times found for stop ${stu.stop_id}`,
-                  );
-                } else {
-                  // Different lookup logic based on system type
-                  if (systemName === "MNR") {
-                    // For MNR, we need to try multiple possible keys:
-
-                    // 1. Try using the vehicle.label/trip_short_name (most reliable for MNR)
-                    const mnrVehicleLabel =
-                      entity.vehicle?.vehicle?.label?.trim();
-                    if (
-                      mnrVehicleLabel &&
-                      stopTimesForStop.has(mnrVehicleLabel)
-                    ) {
-                      staticStopTimeInfo =
-                        stopTimesForStop.get(mnrVehicleLabel) || null;
-                      logger.debug(
-                        `[MNR Stop Time] Found using vehicle label ${mnrVehicleLabel} for stop ${stu.stop_id}`,
-                      );
-                    }
-                    // 2. Try using the static trip ID if available
-                    else if (
-                      staticTripInfo &&
-                      stopTimesForStop.has(staticTripInfo.trip_id)
-                    ) {
-                      staticStopTimeInfo =
-                        stopTimesForStop.get(staticTripInfo.trip_id) || null;
-                      logger.debug(
-                        `[MNR Stop Time] Found using static trip ID ${staticTripInfo.trip_id} for stop ${stu.stop_id}`,
-                      );
-                    }
-                    // 3. Try using trip_short_name from static trip if available
-                    else if (
-                      staticTripInfo?.trip_short_name &&
-                      stopTimesForStop.has(staticTripInfo.trip_short_name)
-                    ) {
-                      staticStopTimeInfo =
-                        stopTimesForStop.get(staticTripInfo.trip_short_name) ||
-                        null;
-                      logger.debug(
-                        `[MNR Stop Time] Found using trip_short_name ${staticTripInfo.trip_short_name} for stop ${stu.stop_id}`,
-                      );
-                    }
-                    // 4. Try with the normalized tripIdFromFeed as last resort
-                    else if (stopTimesForStop.has(tripIdFromFeed)) {
-                      staticStopTimeInfo =
-                        stopTimesForStop.get(tripIdFromFeed) || null;
-                      logger.debug(
-                        `[MNR Stop Time] Found using feed trip ID ${tripIdFromFeed} for stop ${stu.stop_id}`,
-                      );
-                    }
-                    // Log if we still couldn't find a match
-                    else {
-                      logger.debug(
-                        `[MNR Stop Time] No match found for stop ${stu.stop_id} using any ID. vehicleLabel=${entity.vehicle?.vehicle?.label?.trim() || "N/A"}, tripID=${tripIdFromFeed}, staticTripID=${staticTripInfo?.trip_id || "N/A"}, trip_short_name=${staticTripInfo?.trip_short_name || "N/A"}`,
-                      );
-
-                      // For debugging, show a sample of available keys in the stopTimesForStop map
-                      const availableKeys = Array.from(stopTimesForStop.keys())
-                        .slice(0, 5)
-                        .join(", ");
-                      logger.debug(
-                        `[MNR Stop Time Keys] Sample keys for stop ${stu.stop_id}: ${availableKeys}...`,
-                      );
-                    }
-                  } else {
-                    // For LIRR and Subway, use the tripIdFromFeed directly (simpler case)
-                    if (stopTimesForStop.has(tripIdFromFeed)) {
-                      staticStopTimeInfo =
-                        stopTimesForStop.get(tripIdFromFeed) || null;
-                      logger.debug(
-                        `[Stop Time] Found for ${systemName} using trip ID ${tripIdFromFeed} for stop ${stu.stop_id}`,
-                      );
-                    } else {
-                      logger.debug(
-                        `[Stop Time] No match found for ${systemName} stop ${stu.stop_id} with trip ID ${tripIdFromFeed}`,
-                      );
-                    }
-                  }
-                }
-
-                // Log what we found
-                if (staticStopTimeInfo) {
-                  logger.debug(
-                    `[Stop Time Found] For ${systemName} trip at stop ${stu.stop_id}: pickup=${staticStopTimeInfo.pickupType}, dropoff=${staticStopTimeInfo.dropOffType}`,
-                  );
-                }
-
-                // Look up note text if we have a noteId (primarily for MNR)
-                let noteText: string | null = null;
-                if (staticStopTimeInfo?.noteId && staticData.notes) {
-                  const note = staticData.notes.get(staticStopTimeInfo.noteId);
-                  if (note) {
-                    noteText = note.noteDesc || null;
-                    logger.debug(
-                      `[Note] Found note for noteId ${staticStopTimeInfo.noteId}: "${noteText}"`,
-                    );
-                  }
-                }
-
-                const departure: Departure = {
-                  id: `${effectiveTripId}-${stu.stop_id}-${relevantTime}`,
-                  tripId: effectiveTripId,
-                  routeId: actualRouteId,
-                  routeShortName: routeInfo?.route_short_name || "",
-                  routeLongName: routeInfo?.route_long_name || "",
-                  peakStatus: peakStatus,
-                  routeColor: routeInfo?.route_color || null,
-                  destination: finalDestination,
-                  departureTime: scheduledTime,
-                  estimatedDepartureTime: estimatedTime,
-                  delayMinutes: delayMinutes,
-                  track: track,
-                  status: status,
-                  direction: direction,
-                  system: systemName,
-                  destinationBorough,
-                  isTerminalArrival: isTerminalArrival || undefined,
-                  source: "realtime",
-                  // Add wheelchair accessibility info from static data
-                  wheelchair_accessible:
-                    staticTripInfo?.wheelchair_accessible || null,
-                  // Add trainStatus from MTARR extensions for MNR/LIRR
-                  trainStatus,
-                  // Add pickup_type, drop_off_type, and note_id from static stop time info
-                  pickupType: staticStopTimeInfo?.pickupType || null,
-                  dropOffType: staticStopTimeInfo?.dropOffType || null,
-                  noteId: staticStopTimeInfo?.noteId || null,
-                  noteText: noteText,
-                };
-                realtimeDepartures.push(departure);
-              }
-            } catch (mappingError) {
-              // Log the error for debugging purposes
-              logger.error(`Error mapping trip update: ${mappingError}`);
-            }
-          } // End STU loop
-        } // End if trip_update has STUs
-
-        // Process vehicle entities to use vehicleTripId (vehicle.id/label) for MNR trip lookups
-        // For MNR trips, the vehicle.id/label should be used to find the corresponding trip_id
-        if (
-          systemName === "MNR" &&
-          vehicle?.trip?.trip_id &&
-          vehicle.vehicle?.label
-        ) {
-          const vehicleLabel = vehicle.vehicle.label.trim();
-
-          // Add vehicleLabel to processedRealtimeTripIds to ensure we don't duplicate this trip from static data
-          processedRealtimeTripIds.add(vehicleLabel);
-        }
-      } // End entity loop
-    }
-
-    // --- STATIC FALLBACK (Return Scheduled Departures from Static Schedules) ---
-    let addedScheduled = 0;
-
-    // Check if we should run fallback logic
-    // 1. Always run for LIRR/MNR systems - many trips may only be in static data
-    // 2. Run for SUBWAY systems ONLY if no realtime departures were found
-    //
-    // For duplicate prevention, we rely on processedRealtimeTripIds tracking
-    // which ensures we don't add static trips that already exist in realtime data
-
-    if (
-      requestedStationInfo.system === "LIRR" ||
-      requestedStationInfo.system === "MNR" ||
-      (requestedStationInfo.system === "SUBWAY" &&
-        realtimeDepartures.length === 0)
-    ) {
-      logger.debug(
-        `[Departures] Checking static fallback for ${requestedStationInfo.system}...`,
+      // Process entities from this feed
+      const departures = await processRealtimeFeedEntities(
+        decodedEntities,
+        systemName,
+        staticData,
+        originalChildStopIds,
+        processedRealtimeTripIds,
+        now,
+        cutoffTime,
       );
 
-      try {
-        const systemName = requestedStationInfo.system; // LIRR, MNR, or SUBWAY
-        const activeServices = await getActiveServicesForToday(); // Get today's active service IDs
-        logger.debug(
-          `[Static Fallback ${systemName}] Active Service IDs (${activeServices.size}): ${Array.from(activeServices).join(", ")}`,
-        );
-        logger.debug(
-          `[Static Fallback ${systemName}] Found ${activeServices.size} active services today.`,
-        );
-        // Iterate through the station's platforms (original IDs)
-        for (const platformId of originalChildStopIds) {
-          const tripsStoppingAtPlatform =
-            staticData.stopTimeLookup?.get(platformId); // Map<tripId, StopTimeInfo>
-          if (!tripsStoppingAtPlatform) {
-            logger.debug(
-              `[Static Fallback] No trips found for platform ${platformId}`,
-            );
-            continue;
-          }
-          logger.debug(
-            `[Static Fallback] Found ${tripsStoppingAtPlatform.size} trips for platform ${platformId}`,
-          );
-
-          // Iterate through static trips scheduled to stop at this platform
-          for (const [
-            staticTripId,
-            stopTimeInfo,
-          ] of tripsStoppingAtPlatform.entries()) {
-            // Skip if this trip was ALREADY processed via real-time feed
-            // For MNR/LIRR, we need additional normalization to ensure proper matching
-            let normalizedStaticTripId = staticTripId;
-
-            if (systemName === "MNR" || systemName === "LIRR") {
-              // Apply the same normalization as for realtime IDs
-              normalizedStaticTripId = staticTripId.replace(/^0+/, "");
-
-              if (normalizedStaticTripId !== staticTripId) {
-                logger.debug(
-                  `[Trip ID] Normalized static ${systemName} trip ID: ${staticTripId} -> ${normalizedStaticTripId}`,
-                );
-              }
-            }
-
-            // For MNR, also check if trip_short_name is in processedRealtimeTripIds
-            // to avoid duplicates between static and realtime data
-            let shouldSkip = processedRealtimeTripIds.has(
-              normalizedStaticTripId,
-            );
-
-            if (!shouldSkip && systemName === "MNR") {
-              // Get the trip info to check its trip_short_name
-              const tripWithShortName = staticData.trips.get(staticTripId);
-              if (
-                tripWithShortName?.trip_short_name &&
-                processedRealtimeTripIds.has(tripWithShortName.trip_short_name)
-              ) {
-                shouldSkip = true;
-                logger.silly(
-                  `[Static Skip] MNR Trip ${staticTripId} with short_name ${tripWithShortName.trip_short_name} already processed in realtime feed`,
-                );
-              }
-            }
-
-            if (shouldSkip) {
-              logger.debug(
-                `[Static Skip] Trip ${staticTripId} already processed in realtime feed`,
-              );
-              continue;
-            }
-
-            // Get static trip details
-            const tripInfo = staticData.trips.get(staticTripId);
-            // Ensure trip exists, matches the system, and has an active service ID
-            if (
-              !tripInfo ||
-              tripInfo.system !== systemName ||
-              !tripInfo.service_id ||
-              !activeServices.has(tripInfo.service_id)
-            ) {
-              if (!tripInfo) {
-                logger.silly(
-                  ` -> SKIP ${staticTripId}: Not found in staticData.trips map.`,
-                );
-              } else if (tripInfo.system !== systemName) {
-                logger.silly(
-                  `-> SKIP ${staticTripId}: System mismatch (${tripInfo.system} != ${systemName}).`,
-                );
-              } else if (!tripInfo.service_id) {
-                logger.silly(
-                  `-> SKIP ${staticTripId}: Missing service_id in tripInfo.`,
-                );
-              } else if (!activeServices.has(tripInfo.service_id)) {
-                logger.silly(
-                  `-> SKIP ${staticTripId}: Service ID [${tripInfo.service_id}] not found in active list.`,
-                );
-              } else {
-                logger.silly(
-                  `-> SKIP ${staticTripId}: Unknown reason within filter block.`,
-                ); // Should not happen
-              }
-              continue; // Skip this trip
-            }
-
-            // Get scheduled time (prioritize departure)
-            // For MNR and LIRR, also check pickup/dropoff types to respect restrictions
-            const scheduledTimeStr =
-              stopTimeInfo.scheduledDepartureTime ||
-              stopTimeInfo.scheduledArrivalTime;
-            if (!scheduledTimeStr) continue;
-
-            // Check pickup type - if pickup is not allowed (type = 1), skip this stop time
-            // This makes sure we don't show departures where boarding is not allowed
-            if (stopTimeInfo.pickupType === 1) {
-              logger.debug(
-                `[Static Skip] Trip ${staticTripId} at stop ${platformId} has pickup_type=1 (no pickup allowed), skipping`,
-              );
-              continue;
-            }
-
-            // Construct Date object for scheduled time today
-            let scheduledTime: Date | null = null;
-            try {
-              // Handle times > 24:00:00 if necessary (simple parse assumes same day)
-              // Example: "25:10:00" -> Need to add a day to todayStr
-              let hours = parseInt(scheduledTimeStr.substring(0, 2), 10);
-              let parseDateStr = todayStr;
-              const adjustedHour = hours % 24;
-              let parseTimeStr = scheduledTimeStr;
-
-              if (!isNaN(hours) && hours >= 24) {
-                // Time is on the next day
-                const nextDay = new Date(now + 24 * 60 * 60 * 1000); // Add 24 hours
-                parseDateStr = format(nextDay, "yyyy-MM-dd");
-                // Adjust time string for parsing
-                parseTimeStr = `${String(adjustedHour).padStart(2, "0")}:${scheduledTimeStr.substring(3)}`; // e.g., "01:10:00"
-                logger.debug(
-                  `  Adjusted next-day time: ${scheduledTimeStr} -> ${parseDateStr} ${parseTimeStr}`,
-                );
-              }
-              // Use date-fns parse (safer than new Date with just time string)
-              scheduledTime = dateParse(
-                `${parseDateStr} ${parseTimeStr}`,
-                "yyyy-MM-dd HH:mm:ss",
-                new Date(),
-              );
-            } catch (parseError) {
-              logger.error(
-                `[Static Fallback] Error parsing time ${scheduledTimeStr}:`,
-                parseError,
-              );
-              continue;
-            }
-
-            // Check if scheduled time is valid and in the future window
-            const relevantTime = scheduledTime?.getTime();
-            if (
-              relevantTime === null ||
-              isNaN(relevantTime) ||
-              relevantTime < now - 60000 ||
-              relevantTime > cutoffTime
-            ) {
-              // Log if skipping based on time
-              if (relevantTime)
-                logger.debug(
-                  `-> Skipping scheduled ${staticTripId}, time ${new Date(relevantTime).toISOString()} out of window`,
-                );
-              continue;
-            }
-
-            // --- Create "Scheduled" Departure ---
-            try {
-              const actualRouteId = tripInfo.route_id;
-              const routeMapKey = `${systemName}-${actualRouteId}`;
-              const routeInfo = staticData.routes.get(routeMapKey);
-
-              let finalDestination = tripInfo.destinationStopId
-                ? staticData.stops.get(
-                    `${systemName}-${tripInfo.destinationStopId}`,
-                  )?.name
-                : null;
-              if (!finalDestination) finalDestination = tripInfo.trip_headsign;
-              if (!finalDestination)
-                finalDestination =
-                  routeInfo?.route_short_name || "Unknown Destination";
-
-              let direction: Direction = "Unknown";
-
-              // Enhanced debugging for MNR direction_id issues
-              if (systemName === "MNR") {
-                logger.debug(
-                  `[MNR Static Direction] Trip ${staticTripId} has direction_id=${tripInfo?.direction_id}, type=${typeof tripInfo?.direction_id}, stringified=${JSON.stringify(tripInfo?.direction_id)}`,
-                );
-
-                // Check if direction_id is getting parsed correctly
-                if (
-                  tripInfo?.direction_id !== undefined &&
-                  tripInfo?.direction_id !== null
-                ) {
-                  const rawDirId = tripInfo.direction_id;
-                  // Parse to string then back to number to ensure it's a clean numeric value
-                  const parsedDirId = Number(String(rawDirId));
-                  logger.debug(
-                    `[MNR Static Direction] Trip ${staticTripId} direction_id=${rawDirId}, parsed=${parsedDirId}, equals 0: ${parsedDirId === 0}, equals 1: ${parsedDirId === 1}`,
-                  );
-
-                  if (parsedDirId === 1) {
-                    direction = "Outbound";
-                    logger.debug(
-                      `[MNR Static Direction] Setting direction to Outbound for trip ${staticTripId}`,
-                    );
-                  } else if (parsedDirId === 0) {
-                    direction = "Inbound";
-                    logger.debug(
-                      `[MNR Static Direction] Setting direction to Inbound for trip ${staticTripId}`,
-                    );
-                  } else {
-                    logger.warn(
-                      `[MNR Static Direction] Unexpected direction_id value: ${parsedDirId} for trip ${staticTripId}`,
-                    );
-                  }
-                } else {
-                  logger.warn(
-                    `[MNR Static Direction] Missing direction_id for trip ${staticTripId}`,
-                  );
-                }
-              } else {
-                // Standard behavior for non-MNR trips
-                if (tripInfo?.direction_id === 0) direction = "Outbound";
-                else if (tripInfo?.direction_id === 1) direction = "Inbound";
-              }
-
-              // --- Determine Peak Status using tripInfo ---
-              const peakStatus = getPeakStatus(tripInfo?.peak_offpeak);
-              // ---
-              //
-
-              // For MNR static trips, include trip_short_name (which corresponds to vehicle.label)
-              const effectiveTripId =
-                systemName === "MNR" && tripInfo.trip_short_name
-                  ? tripInfo.trip_short_name // Use trip_short_name as the displayed tripId for MNR
-                  : staticTripId; // Use static ID for other systems
-
-              // For static data, estimatedDepartureTime equals departureTime (no delay)
-              const departure: Departure = {
-                id: staticTripId,
-                tripId: effectiveTripId, // Use trip_short_name for MNR, static ID for others
-                routeId: actualRouteId,
-                routeShortName: routeInfo?.route_short_name || "",
-                routeLongName: routeInfo?.route_long_name || "",
-                peakStatus: peakStatus,
-                routeColor: routeInfo?.route_color || null,
-                destination: finalDestination,
-                departureTime: scheduledTime, // Use SCHEDULED Date object
-                estimatedDepartureTime: scheduledTime, // For static data, estimated = scheduled
-                delayMinutes: null, // No delay info
-                // Include track information from stop_times.txt if available
-                track: stopTimeInfo.track || undefined,
-                status: "Scheduled", // Explicitly set status
-                direction: direction,
-                destinationBorough:
-                  staticData.stops.get(
-                    `${systemName}-${tripInfo.destinationStopId}`,
-                  )?.borough || null,
-                system: systemName,
-                // Determine if this is a terminal arrival based on station info
-                isTerminalArrival: (() => {
-                  // First, check if this is a known terminal station
-                  const stopKey = `${systemName}-${platformId}`;
-                  const stopInfo = staticData.stops.get(stopKey);
-
-                  // Consider it a terminal if the station is marked as terminal or the direction suggests it
-                  // (direction_id = 1 typically means inbound to a major terminal for commuter rail)
-                  return stopInfo?.isTerminal ||
-                    ((systemName === "MNR" || systemName === "LIRR") &&
-                      tripInfo.direction_id === 1)
-                    ? true
-                    : false;
-                })(),
-                source: "scheduled",
-                // Include wheelchair accessibility information from static trip data
-                wheelchair_accessible: tripInfo.wheelchair_accessible || null,
-                // Add pickup_type, drop_off_type, and note_id from stop time info
-                pickupType: stopTimeInfo.pickupType || null,
-                dropOffType: stopTimeInfo.dropOffType || null,
-                noteId: stopTimeInfo.noteId || null,
-                // Look up and include note text if available (mainly for MNR)
-                noteText: (() => {
-                  if (stopTimeInfo.noteId && staticData.notes) {
-                    const note = staticData.notes.get(stopTimeInfo.noteId);
-                    if (note) {
-                      logger.debug(
-                        `[Static Note] Found note for trip ${staticTripId} at ${platformId}: noteId=${stopTimeInfo.noteId}, text="${note.noteDesc}"`,
-                      );
-                      return note.noteDesc || null;
-                    }
-                  }
-                  return null;
-                })(),
-              };
-              scheduledDepartures.push(departure);
-              addedScheduled++;
-            } catch (mapError) {
-              logger.error(
-                `[Static Fallback] Error mapping scheduled trip ${staticTripId}:`,
-                mapError,
-              );
-            }
-            // --- End Create Scheduled ---
-          } // End loop tripsStoppingHere
-        } // End loop platformId
-        logger.debug(
-          `[Departures] Added ${addedScheduled} scheduled departures via static fallback for ${systemName}.`,
-        );
-      } catch (fallbackError) {
-        logger.error(
-          `[Departures] Error during static fallback for ${requestedStationInfo.system}:`,
-          fallbackError,
-        );
-      }
+      realtimeDepartures.push(...departures);
     }
-    // --- END STATIC FALLBACK ---
 
-    // Filter departures based on sourceFilter if provided
+    // --- 8. Process static schedule data if needed ---
+    const system = requestedStationInfo.system;
+    const needStaticFallback =
+      system === "LIRR" ||
+      system === "MNR" ||
+      (system === "SUBWAY" && realtimeDepartures.length === 0);
+
+    if (needStaticFallback) {
+      logger.debug(`[Departures] Checking static fallback for ${system}...`);
+
+      const staticDepartures = await processStaticScheduleData(
+        system,
+        originalChildStopIds,
+        staticData,
+        processedRealtimeTripIds,
+        now,
+        cutoffTime,
+        todayStr,
+      );
+
+      scheduledDepartures.push(...staticDepartures);
+    }
+
+    // --- 9. Apply source filter ---
     let filteredRealtime = realtimeDepartures;
     let filteredScheduled = scheduledDepartures;
 
@@ -1456,15 +1665,14 @@ export async function getDeparturesForStation(
       );
     }
 
-    // Combine and Sort Real-time + Scheduled
+    // --- 10. Combine and sort departures ---
     const combinedDepartures = [...filteredRealtime, ...filteredScheduled];
-    totalDeparturesCreated = combinedDepartures.length; // Final count
 
     logger.debug(
       `[Departures] Combined ${filteredRealtime.length} realtime and ${filteredScheduled.length} scheduled departures (source filter: ${sourceFilter || "none"})`,
     );
 
-    // Final Sort (Direction then Time)
+    // Sort by direction then time
     combinedDepartures.sort((a, b) => {
       const dirOrder: Record<string, number> = {
         Uptown: 1,

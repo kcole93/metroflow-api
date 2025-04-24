@@ -148,6 +148,7 @@ export async function getStations(
         longitude: stopInfo.longitude,
         lines: lines.sort(),
         system: stopInfo.system,
+        borough: stopInfo.borough ? stopInfo.borough : undefined,
         wheelchair_boarding: stopInfo.wheelchairBoarding || undefined,
       });
     }
@@ -253,6 +254,8 @@ function determineTripDirection(
   rtTrip: any,
   tripIdFromFeed: string,
   stopTimeUpdates: any[],
+  currentStopId: string,
+  staticData: StaticData,
 ): Direction {
   let tripDirection: Direction = "Unknown";
 
@@ -333,7 +336,7 @@ function determineTripDirection(
       );
     }
   } else if (staticTripInfo) {
-    // For other systems, use static info if available
+    // For LIRR, use static info if available
     if (systemName === "LIRR") {
       if (staticTripInfo.direction_id != null) {
         const dirId = staticTripInfo.direction_id;
@@ -341,10 +344,135 @@ function determineTripDirection(
         else if (dirId === 1) tripDirection = "Inbound";
       }
     }
-  } else if (systemName === "SUBWAY") {
-    const nyctTripExt = rtTrip?.[".transit_realtime.nyct_trip_descriptor"];
-    if (nyctTripExt?.direction === 1) tripDirection = "N";
-    else if (nyctTripExt?.direction === 3) tripDirection = "S";
+    // For the subway, we want real-time data
+  } // --- SUBWAY LOGIC ---
+  if (systemName === "SUBWAY") {
+    logger.debug(
+      `[Subway Direction Start] Trip: ${tripIdFromFeed}, Platform: ${currentStopId}`,
+    );
+
+    if (currentStopId && currentStopId.length > 1) {
+      // ** Method 1: Use Stop ID Suffix to determine LOCAL direction **
+      const platformSuffix = currentStopId
+        .charAt(currentStopId.length - 1)
+        .toUpperCase();
+      let localLogicalDirection: "N" | "S" | null = null;
+
+      if (platformSuffix === "N") {
+        localLogicalDirection = "N";
+      } else if (platformSuffix === "S") {
+        localLogicalDirection = "S";
+      } else {
+        logger.warn(
+          `[Subway Direction] Platform ID ${currentStopId} for trip ${tripIdFromFeed} does not end in N or S. Cannot determine local direction from suffix.`,
+        );
+      }
+
+      logger.debug(
+        `[Subway Direction] Determined local logical direction from suffix '${platformSuffix}': ${localLogicalDirection || "None"}`,
+      );
+
+      // ** Method 2: Look up Parent Station Label based on LOCAL direction **
+      if (localLogicalDirection) {
+        const currentPlatformKey = `${systemName}-${currentStopId}`;
+        const currentPlatformInfo = staticData.stops.get(currentPlatformKey);
+        // *** Find the PARENT station ID ***
+        const parentStationKey = currentPlatformInfo?.parentStationId
+          ? currentPlatformInfo.parentStationId
+          : currentPlatformKey; // Fallback if no parent (should be rare for N/S stops)
+
+        if (parentStationKey) {
+          const parentStationInfo = staticData.stops.get(parentStationKey);
+
+          if (parentStationInfo) {
+            let label: string | null = null;
+            if (localLogicalDirection === "N" && parentStationInfo.northLabel) {
+              label = parentStationInfo.northLabel;
+              logger.debug(
+                `[Subway Direction] Using North Label from Parent ${parentStationKey}: "${label}"`,
+              );
+            } else if (
+              localLogicalDirection === "S" &&
+              parentStationInfo.southLabel
+            ) {
+              label = parentStationInfo.southLabel;
+              logger.debug(
+                `[Subway Direction] Using South Label from Parent ${parentStationKey}: "${label}"`,
+              );
+            } else {
+              logger.warn(
+                `[Subway Direction] Parent ${parentStationKey} found, but no matching label for local direction '${localLogicalDirection}' (NorthLabel: ${parentStationInfo.northLabel}, SouthLabel: ${parentStationInfo.southLabel})`,
+              );
+            }
+
+            if (label) {
+              tripDirection = label as Direction; // Use the user-friendly label!
+            } else {
+              // Fallback if label is missing, use the logical N/S
+              tripDirection = localLogicalDirection; // Assign 'N' or 'S'
+              logger.debug(
+                `[Subway Direction] No specific label found, using logical direction: ${tripDirection}`,
+              );
+            }
+          } else {
+            logger.warn(
+              `[Subway Direction] Could not find static info for parent/self station key ${parentStationKey} (derived from platform ${currentStopId}). Falling back to logical N/S.`,
+            );
+            // Fallback if parent lookup fails
+            tripDirection = localLogicalDirection;
+          }
+        } else {
+          logger.warn(
+            `[Subway Direction] Could not determine parent station key for platform ${currentStopId}. Falling back to logical N/S.`,
+          );
+          // Fallback if parent key fails
+          tripDirection = localLogicalDirection;
+        }
+      } // End if localLogicalDirection
+    } else {
+      logger.warn(
+        `[Subway Direction] Invalid or missing currentStopId: ${currentStopId} for trip ${tripIdFromFeed}. Cannot determine direction.`,
+      );
+    }
+
+    // ** Fallback (Optional): Use Trip-Level Direction if Primary Methods Failed **
+    // This might be less reliable for display but could be a last resort
+    if (tripDirection === "Unknown" || tripDirection === null) {
+      // Check explicitly for null from localLogicalDirection assignment
+      const nyctTripExt = rtTrip?.[".transit_realtime.nyct_trip_descriptor"];
+      const feedDirectionId = nyctTripExt?.direction; // 1 or 3
+
+      logger.warn(
+        `[Subway Direction] Primary methods failed for ${currentStopId}. Trying fallback using trip direction ${feedDirectionId}.`,
+      );
+
+      if (feedDirectionId === 1)
+        tripDirection = "N"; // Or "Northbound"
+      else if (feedDirectionId === 3) tripDirection = "S"; // Or "Southbound"
+      if (tripDirection !== "Unknown" && tripDirection !== null) {
+        logger.debug(
+          `[Subway Direction] Using Trip Feed ID Fallback: ${tripDirection}`,
+        );
+      }
+    }
+
+    if (tripDirection === "Unknown" || tripDirection === null) {
+      logger.error(
+        // Elevate to error if absolutely no direction found
+        `[Subway Direction] FINAL UNABLE to determine direction for trip ${tripIdFromFeed} at platform ${currentStopId}`,
+      );
+      tripDirection = "Unknown"; // Ensure it's the string "Unknown"
+    }
+    logger.debug(
+      `[Subway Direction End] Final direction for ${tripIdFromFeed} at ${currentStopId}: ${tripDirection}`,
+    );
+  } // --- END SUBWAY LOGIC ---
+
+  // Final catch-all if still unknown (e.g., LIRR without static match)
+  if (tripDirection === "Unknown") {
+    logger.warn(
+      `[Direction Determination] Final direction unknown for Trip ${tripIdFromFeed}, System: ${systemName}`,
+    );
   }
 
   return tripDirection;
@@ -417,97 +545,117 @@ function determineDestination(
         }
       }
     }
-  } else if (systemName === "SUBWAY") {
-    // --- SUBWAY: Prioritize headsign for better rider wayfinding ---
+  } // --- SUBWAY: Prioritize Realtime Last Stop for Destination Accuracy ---
+  // --- SUBWAY: Prioritize Realtime Last Stop based on ARRAY ORDER ---
+  else if (systemName === "SUBWAY") {
+    // --- Method 1: Last stop from THIS trip_update's stopTimeUpdates array ORDER ---
+    if (stopTimeUpdates && stopTimeUpdates.length > 0) {
+      // Check if array exists and is not empty
+      destSource = "Realtime Last Stop (Order)";
+      // Get the LAST element in the stopTimeUpdates array
+      const lastStopUpdate = stopTimeUpdates[stopTimeUpdates.length - 1];
 
-    // --- Method 1: Try trip_headsign from static data first for subway ---
-    if (staticTripInfo?.trip_headsign) {
-      destSource = "Trip Headsign";
-      finalDestination = staticTripInfo.trip_headsign;
-      logger.debug(
-        `[Subway Destination] Set from trip_headsign: ${finalDestination}`,
-      );
+      if (lastStopUpdate && lastStopUpdate.stop_id) {
+        const lastPlatformId = lastStopUpdate.stop_id.trim();
+        const lastPlatformKey = `${systemName}-${lastPlatformId}`;
+        // Get the stop_sequence value just for logging, DO NOT use it for logic
+        const seqForLog =
+          lastStopUpdate.stop_sequence !== undefined
+            ? ` (Seq reported: ${lastStopUpdate.stop_sequence})`
+            : "";
+        logger.debug(
+          `[Subway Destination] Last platform ID from RT update array order: ${lastPlatformId}${seqForLog}`,
+        );
 
-      // After setting the destination from headsign, check if the trip has been shortened
-      // by comparing with the last stop in the realtime feed
-      if (stopTimeUpdates.length > 0) {
-        // Find the last stop in sequence
-        let lastStopUpdate = stopTimeUpdates[0];
-        let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
+        // **Get the PARENT station name for the destination display**
+        const lastPlatformInfo = staticData.stops.get(lastPlatformKey);
+        const parentStationId = lastPlatformInfo?.parentStationId;
+        // Construct parent key ONLY if parentStationId exists and is different from the platform's original ID
+        const parentStationKey =
+          parentStationId &&
+          parentStationId !== lastPlatformInfo?.originalStopId
+            ? parentStationId
+            : lastPlatformKey; // Fallback: use the platform key itself if it's the parent or lookup failed
 
-        for (let i = 1; i < stopTimeUpdates.length; i++) {
-          const currentSequence = Number(stopTimeUpdates[i].stop_sequence) || 0;
-          if (currentSequence > maxSequence) {
-            maxSequence = currentSequence;
-            lastStopUpdate = stopTimeUpdates[i];
-          }
-        }
+        logger.debug(
+          `[Subway Destination] Looking up parent station key: ${parentStationKey} (derived from ${lastPlatformKey})`,
+        );
+        const destStopInfo = staticData.stops.get(parentStationKey);
 
-        const lastStopId = lastStopUpdate?.stop_id?.trim();
-        if (lastStopId) {
-          const destStopKey = `${systemName}-${lastStopId}`;
-          const destStopInfo = staticData.stops.get(destStopKey);
-
-          // If the last stop from realtime has a name and it's different from the headsign,
-          // append this information to indicate a shortened trip
-          if (
-            destStopInfo &&
-            destStopInfo.name !== finalDestination &&
-            destStopInfo.name.length > 0
-          ) {
-            finalDestination = `${finalDestination} (Trip ends at ${destStopInfo.name})`;
-            destinationBorough = destStopInfo.borough || null;
-            destSource = "Headsign with shortened trip";
+        if (destStopInfo) {
+          finalDestination = destStopInfo.name; // Use parent station name
+          destinationBorough = destStopInfo.borough || null;
+          logger.debug(
+            `[Subway Destination] Set from Realtime Last Stop's Parent (Order): ${finalDestination} (Parent Key: ${parentStationKey})`,
+          );
+        } else {
+          logger.warn(
+            `[Subway Destination] Realtime last platform found (${lastPlatformKey}), but failed to look up static info for parent key ${parentStationKey}.`,
+          );
+          if (lastPlatformInfo) {
+            finalDestination = lastPlatformInfo.name;
+            destinationBorough = lastPlatformInfo.borough || null;
+            destSource = "Realtime Last Stop (Order - Platform Name Fallback)";
             logger.debug(
-              `[Subway Destination] Detected shortened trip: ${finalDestination}`,
+              `[Subway Destination] Using platform name as fallback: ${finalDestination}`,
+            );
+          } else {
+            logger.error(
+              `[Subway Destination] Could not find static info for platform ${lastPlatformKey} either.`,
             );
           }
         }
-      }
-    }
-    // --- Method 2: If no headsign, try static destination stop ID ---
-    else if (staticTripInfo?.destinationStopId && staticTripInfo.system) {
-      destSource = "Static DestinationStopId";
-      const staticDestKey = `${staticTripInfo.system}-${staticTripInfo.destinationStopId}`;
-      const staticDestStop = staticData.stops.get(staticDestKey);
-
-      if (staticDestStop) {
-        finalDestination = staticDestStop.name;
-        destinationBorough = staticDestStop.borough || null;
-        logger.debug(
-          `[Subway Destination] Set from static destinationStopId: ${finalDestination} (${staticDestKey})`,
+      } else {
+        logger.warn(
+          `[Subway Destination] Last element in stopTimeUpdates array lacked a valid stop_id.`,
         );
       }
+    } else {
+      logger.warn(
+        `[Subway Destination] No stopTimeUpdates provided in the realtime feed for trip ${rtTrip?.trip_id}. Cannot determine destination from RT.`,
+      );
     }
-    // --- Method 3: If previous methods failed, use last stop from realtime ---
-    else if (stopTimeUpdates.length > 0) {
-      destSource = "Last Stop Calculation";
-      let lastStopUpdate = stopTimeUpdates[0];
-      let maxSequence = Number(lastStopUpdate.stop_sequence) || 0;
 
-      for (let i = 1; i < stopTimeUpdates.length; i++) {
-        const currentSequence = Number(stopTimeUpdates[i].stop_sequence) || 0;
-        if (currentSequence > maxSequence) {
-          maxSequence = currentSequence;
-          lastStopUpdate = stopTimeUpdates[i];
-        }
+    // --- Fallbacks using Static Data (ONLY if Realtime Last Stop failed) ---
+    if (finalDestination === "Unknown Destination") {
+      // (Keep your existing static fallback logic here - headsign, then static dest stop ID)
+      logger.debug(
+        `[Subway Destination] Realtime last stop method failed. Falling back to static data.`,
+      );
+      // Fallback 1: Static trip_headsign
+      if (staticTripInfo?.trip_headsign) {
+        destSource = "Static Trip Headsign (Fallback)";
+        finalDestination = staticTripInfo.trip_headsign;
+        logger.debug(
+          `[Subway Destination] Using Fallback: Static trip_headsign: ${finalDestination}`,
+        );
       }
+      // Fallback 2: Static destinationStopId
+      else if (staticTripInfo?.destinationStopId && staticTripInfo.system) {
+        destSource = "Static DestinationStopId (Fallback)";
+        const staticDestKey = `${staticTripInfo.system}-${staticTripInfo.destinationStopId}`;
+        const staticDestPlatformInfo = staticData.stops.get(staticDestKey);
+        const staticDestParentId = staticDestPlatformInfo?.parentStationId;
+        const staticDestParentKey =
+          staticDestParentId &&
+          staticDestParentId !== staticDestPlatformInfo?.originalStopId
+            ? `${staticTripInfo.system}-${staticDestParentId}`
+            : staticDestKey;
 
-      const lastStopId = lastStopUpdate?.stop_id?.trim();
-      if (lastStopId) {
-        const destStopKey = `${systemName}-${lastStopId}`;
-        const destStopInfo = staticData.stops.get(destStopKey);
-
-        if (destStopInfo) {
-          finalDestination = destStopInfo.name;
-          destinationBorough = destStopInfo.borough || null;
-          destSource = "Last Stop Name";
+        const staticDestStop = staticData.stops.get(staticDestParentKey);
+        if (staticDestStop) {
+          finalDestination = staticDestStop.name;
+          destinationBorough = staticDestStop.borough || null;
           logger.debug(
-            `[Subway Destination] Set from last stop: ${finalDestination} (${destStopKey})`,
+            `[Subway Destination] Using Fallback: Static destinationStopId's Parent: ${finalDestination} (Parent Key: ${staticDestParentKey})`,
+          );
+        } else {
+          logger.warn(
+            `[Subway Destination] Static destination platform key ${staticDestKey} found, but failed lookup for parent ${staticDestParentKey}`,
           );
         }
       }
-    }
+    } // --- END SUBWAY LOGIC ---
   } else {
     // --- For LIRR and other non-MNR/non-Subway systems ---
 
@@ -1170,16 +1318,7 @@ async function processRealtimeFeedEntities(
         }
       }
 
-      // 2. Determine Trip Direction
-      const tripDirection = determineTripDirection(
-        systemName,
-        staticTripInfo,
-        rtTrip,
-        tripIdFromFeed,
-        stopTimeUpdates,
-      );
-
-      // 3. Determine Destination
+      // 2. Determine Destination
       const { finalDestination, destinationBorough } = determineDestination(
         systemName,
         staticTripInfo,
@@ -1191,7 +1330,7 @@ async function processRealtimeFeedEntities(
       // Track processed trip to avoid duplicates in static data
       processedRealtimeTripIds.add(tripIdFromFeed);
 
-      // 4. Loop through Stop Time Updates (STUs)
+      // 3. Loop through Stop Time Updates (STUs)
       for (const stu of stopTimeUpdates) {
         const stuOriginalStopId = stu.stop_id?.trim();
 
@@ -1264,6 +1403,16 @@ async function processRealtimeFeedEntities(
           );
           continue;
         }
+        // Determine trip direction
+        const tripDirection = determineTripDirection(
+          systemName,
+          staticTripInfo,
+          rtTrip,
+          tripIdFromFeed,
+          stopTimeUpdates,
+          stuOriginalStopId,
+          staticData,
+        );
 
         // Extract track information
         const track = extractTrackInfo(stu, systemName, originalChildStopIds);

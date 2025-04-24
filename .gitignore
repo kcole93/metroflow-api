@@ -6,3 +6,4 @@ logs/
 data/
 *.db
 *.sqlite
+temp-downloads/

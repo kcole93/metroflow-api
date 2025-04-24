@@ -10,6 +10,7 @@ export interface Station {
   longitude?: number;
   lines?: string[]; // Array of route short names (e.g., ["1"], ["B", "C"])
   system?: string;
+  borough?: string;
   wheelchair_boarding?: number; // 0=No info, 1=Some accessible boarding, 2=Not possible
 }
 
@@ -20,12 +21,15 @@ export type PeakStatus = "Peak" | "Off-Peak";
 export interface StaticStopTimeInfo {
   scheduledDepartureTime?: string | null; // Store as HH:MM:SS string
   scheduledArrivalTime?: string | null; // Store as HH:MM:SS string
-  stopSequence: number;
+  stopSequence?: number;
   track?: string | null; // Include track if available in stop_times.txt
   pickupType?: number | null; // 0=Regular, 1=No pickup, 2=Call agency, 3=Coordinate with driver
   dropOffType?: number | null; // 0=Regular, 1=No drop off, 2=Call agency, 3=Coordinate with driver
   noteId?: string | null; // References specific notes for this stop time (MNR/LIRR)
   noteText?: string | null; // The actual note text associated with the noteId
+  borough: string | null;
+  northLabel: string | null; // The label for the north direction (e.g., "Northbound")
+  southLabel: string | null; // The label for the south direction (e.g., "Southbound")
 }
 
 /**
@@ -120,6 +124,8 @@ export interface StaticStopInfo {
   borough?: string | null; // Optional borough name
   isTerminal?: boolean; // Indicates if this is a terminal station (major hub)
   wheelchairBoarding?: number | null; // 0=No information, 1=Some accessible boarding, 2=Not possible
+  northLabel: string | null; // Human-readable label for northbound directions, Subway only
+  southLabel: string | null; // Human-readable label for southbound directions, Subway only
 }
 
 // Helper function to create a case-insensitive Set
@@ -187,10 +193,10 @@ export interface StaticTripInfo {
  * This structure holds the maps used for efficient lookups within the services.
  */
 export interface Note {
-  noteId: string;      // Unique identifier, like "H" or "B"
-  noteMark: string;    // Display marker
-  noteTitle: string;   // Title/heading for the note
-  noteDesc: string;    // Full description text
+  noteId: string; // Unique identifier, like "H" or "B"
+  noteMark: string; // Display marker
+  noteTitle: string; // Title/heading for the note
+  noteDesc: string; // Full description text
 }
 
 export interface StaticData {

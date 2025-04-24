@@ -21,6 +21,13 @@ dotenv.config();
 let currentStaticData: StaticData | null = null;
 let staticData: StaticData | null = null;
 const BASE_DATA_PATH = path.join(__dirname, "..", "assets", "gtfs-static");
+const STATIONS_CSV_PATH = path.join(
+  __dirname,
+  "..",
+  "assets",
+  "geodata",
+  "stations.csv",
+);
 
 // Base interface for raw stop time data from CSV
 interface StopTimeBase {
@@ -33,6 +40,14 @@ interface StopTimeBase {
   pickup_type?: string;
   drop_off_type?: string;
   note_id?: string;
+}
+
+// Interface for MTA Stations CSV row data
+interface StationCsvRow {
+  "GTFS Stop ID": string;
+  Borough: string;
+  "North Direction Label": string;
+  "South Direction Label": string;
 }
 
 function addRouteToMap(
@@ -103,6 +118,14 @@ function processStop(
   rawStop: any,
   system: SystemType,
   map: Map<string, StaticStopInfo>, // Use the passed map
+  stationDetailsMap: Map<
+    string,
+    {
+      borough: string | null;
+      northLabel: string | null;
+      southLabel: string | null;
+    }
+  >,
 ) {
   const originalStopId = rawStop.stop_id?.trim();
   if (!originalStopId) return;
@@ -141,10 +164,20 @@ function processStop(
     !isNaN(longitude) ? longitude : undefined,
   );
 
+  logger.debug(
+    `[Borough Check] Stop: ${originalStopId}, Lat: ${latitude}, Lon: ${longitude}, Result: ${borough}`,
+  );
+
   // Determine if this is a terminal/major station
   // Currently based on stop names
   const stopName = rawStop.stop_name || "";
   const isTerminal = determineIfTerminal(system, stopName, originalStopId);
+
+  // Get North/South Labels from the pre-processed station details map
+  const stationDetails = stationDetailsMap.get(originalStopId); // Lookup by original GTFS Stop ID
+  const northLabel = stationDetails?.northLabel || null;
+  const southLabel = stationDetails?.southLabel || null;
+  const finalBorough = stationDetails?.borough || borough; // Set borough for Subway stops from CSV
 
   // Log wheelchair accessibility info for LIRR stations
   if (system === "LIRR" && wheelchairBoardingNum !== null) {
@@ -178,6 +211,8 @@ function processStop(
       borough: borough,
       isTerminal: isTerminal,
       wheelchairBoarding: wheelchairBoardingNum,
+      northLabel: northLabel,
+      southLabel: southLabel,
     });
   }
 }
@@ -233,8 +268,39 @@ export async function loadStaticData(): Promise<void> {
     string,
     Map<string, StaticStopTimeInfo>
   >();
+  const stationDetailsMap = new Map<string, StaticStopTimeInfo>();
 
   try {
+    // --- Phase 0: Load Station Details CSV ---
+    logger.info("Phase 0: Loading Station Details CSV...");
+    try {
+      const stationCsvRaw = await parseCsvFile<StationCsvRow>(
+        STATIONS_CSV_PATH,
+        logger,
+      );
+      let count = 0;
+      for (const row of stationCsvRaw) {
+        const stopId = row["GTFS Stop ID"]?.trim(); // Match exact header name
+        if (stopId) {
+          stationDetailsMap.set(stopId, {
+            borough: row.Borough?.trim() || null,
+            northLabel: row["North Direction Label"]?.trim() || null,
+            southLabel: row["South Direction Label"]?.trim() || null,
+          });
+          count++;
+        }
+      }
+      logger.info(
+        `Phase 0 finished. Loaded details for ${count} stations from CSV.`,
+      );
+    } catch (csvError) {
+      logger.error(
+        `Fatal error loading Station Details CSV (${STATIONS_CSV_PATH}):`,
+        csvError,
+      );
+      throw csvError; // Stop loading if this critical file fails
+    }
+
     // --- 1. Load All Raw Files ---
     logger.info("Phase 1: Loading raw CSV files...");
     const promises = systems.flatMap((sys) => [
@@ -318,15 +384,18 @@ export async function loadStaticData(): Promise<void> {
     );
 
     // --- 5. Enrich static data ---
-    logger.info(
-      "Pass 5: Processing raw stops into enriched map + geofencing...",
+    logger.info("Pass 5: Processing raw stops into enriched map...");
+    lirrStopsRaw.forEach((s) =>
+      processStop(s, "LIRR", tempLoadedStops, stationDetailsMap),
     );
-    let stopsGeofencedCount = 0;
-    lirrStopsRaw.forEach((s) => processStop(s, "LIRR", tempLoadedStops));
-    subwayStopsRaw.forEach((s) => processStop(s, "SUBWAY", tempLoadedStops));
-    mnrStopsRaw.forEach((s) => processStop(s, "MNR", tempLoadedStops));
+    subwayStopsRaw.forEach((s) =>
+      processStop(s, "SUBWAY", tempLoadedStops, stationDetailsMap),
+    );
+    mnrStopsRaw.forEach((s) =>
+      processStop(s, "MNR", tempLoadedStops, stationDetailsMap),
+    );
     logger.info(
-      `Pass 5 finished. enrichedStops size: ${tempLoadedStops.size}. Geofenced: ${stopsGeofencedCount}`,
+      `Pass 5 finished. enrichedStops size: ${tempLoadedStops.size}.`,
     );
 
     // --- 6. Link children to parents (using unique keys) ---
@@ -387,6 +456,9 @@ export async function loadStaticData(): Promise<void> {
         pickupType: pickupType,
         dropOffType: dropOffType,
         noteId: st.note_id?.trim() || null,
+        borough: st.borough?.trim() || null,
+        northLabel: st.north_label?.trim() || null,
+        southLabel: st.south_label?.trim() || null,
       };
 
       // Add the primary entry with the original tripId
@@ -401,7 +473,7 @@ export async function loadStaticData(): Promise<void> {
         tempLoadedStopTimeLookup
           .get(stopId)
           ?.set(tripInfo.trip_short_name, stopTimeInfo);
-        logger.debug(
+        logger.silly(
           `[MNR StopTime] Added additional lookup key for stop ${stopId}: ${tripInfo.trip_short_name} -> ${tripId}`,
         );
       }
@@ -474,7 +546,7 @@ export async function loadStaticData(): Promise<void> {
     processStopTimesForFeeds(allStopTimesRaw); // Process combined list
     logger.info("Pass 8 finished.");
 
-    // --- *** ATOMIC UPDATE *** ---
+    // --- ATOMIC UPDATE ---
     // If ALL phases succeeded, overwrite the module-level variable
     // with the newly processed data.
     // --- 9. Build the tripsByShortName and vehicleTripsMap lookup maps for MNR

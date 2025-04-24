@@ -84,7 +84,9 @@ export async function fetchAndParseFeed(
         );
         return null;
       }
-      // logger.log(`[Fetch] Decoded ${message.entity.length} entities for ${feedName}.`); // Reduce noise
+      logger.debug(
+        `[Fetch] Decoded ${message.entity.length} entities for ${feedName}.`,
+      );
     } catch (decodeError) {
       logger.error(
         `[Fetch] Protobuf DECODING FAILED for ${feedName}:`,
@@ -106,7 +108,10 @@ export async function fetchAndParseFeed(
         });
       }
     } catch (toObjectError) {
-      // logger.warn(`[Fetch] FeedMessage.toObject failed for ${feedName}. Error:`, toObjectError); // Reduce noise
+      logger.warn(
+        `[Fetch] FeedMessage.toObject failed for ${feedName}. Error:`,
+        toObjectError,
+      );
     }
 
     const result = { message, feedObject };

@@ -16,8 +16,10 @@ import {
   DepartureSource,
   StaticStopTimeInfo,
   StaticTripInfo,
+  AccessibilityStatus,
 } from "../types";
 import * as dotenv from "dotenv";
+import { get } from "node:http";
 
 dotenv.config();
 
@@ -91,6 +93,55 @@ export const ROUTE_ID_TO_FEED_MAP: { [key: string]: string } = {
   "MNR-6": MNR_FEED,
 };
 
+// --- Helper function to determine per-station accessibility
+function getStationAccessibilityInfo(stopInfo: StaticStopInfo): {
+  accessibilityStatus: AccessibilityStatus;
+  accessibilityNotes: string | null;
+} {
+  logger.debug(
+    // Use info level for clarity during debugging
+    `[Accessibility Check] Station: ${stopInfo.name} (${stopInfo.id}), System: ${stopInfo.system}, ` +
+      `Source adaStatus: ${stopInfo.adaStatus} (Type: ${typeof stopInfo.adaStatus}), ` +
+      `Source wheelchairBoarding: ${stopInfo.wheelchairBoarding} (Type: ${typeof stopInfo.wheelchairBoarding})`,
+  );
+
+  let accessibilityStatus: AccessibilityStatus = "No Information"; // Default
+
+  if (stopInfo.system === "SUBWAY") {
+    switch (stopInfo.adaStatus) {
+      case 1:
+        accessibilityStatus = "Fully Accessible";
+        break;
+      case 2:
+        accessibilityStatus = "Partially Accessible";
+        break;
+      case 0:
+        accessibilityStatus = "Not Accessible";
+        break;
+      default:
+        // Keep default "No Information" for null/undefined/other
+        break;
+    }
+  } else if (stopInfo.system === "LIRR" || stopInfo.system === "MNR") {
+    switch (stopInfo.wheelchairBoarding) {
+      case 1:
+        // LIRR/MNR 1 maps to 'Accessible', no standard 'Partial' state here
+        accessibilityStatus = "Fully Accessible";
+        break;
+      case 2:
+        accessibilityStatus = "Not Accessible";
+        break;
+      case 0:
+      default:
+        break;
+    }
+  }
+
+  const accessibilityNotes = stopInfo.adaNotes || null;
+
+  return { accessibilityStatus, accessibilityNotes };
+}
+
 // --- getStations Function ---
 export async function getStations(
   query?: string,
@@ -141,6 +192,10 @@ export async function getStations(
           else if (routeInfo && !lines.includes(routeId)) lines.push(routeId);
         }
       }
+
+      const { accessibilityStatus, accessibilityNotes } =
+        getStationAccessibilityInfo(stopInfo);
+
       stations.push({
         id: stopInfo.id,
         name: stopInfo.name,
@@ -150,6 +205,8 @@ export async function getStations(
         system: stopInfo.system,
         borough: stopInfo.borough ? stopInfo.borough : undefined,
         wheelchair_boarding: stopInfo.wheelchairBoarding || undefined,
+        accessibilityStatus: accessibilityStatus,
+        accessibilityNotes: accessibilityNotes || undefined,
       });
     }
   }
@@ -1119,8 +1176,6 @@ function createRealtimeDeparture(
       destinationBorough,
       isTerminalArrival: isTerminalArrival || undefined,
       source: "realtime",
-      // Add wheelchair accessibility info from static data
-      wheelchair_accessible: staticTripInfo?.wheelchair_accessible || null,
       // Add trainStatus from MTARR extensions for MNR/LIRR
       trainStatus,
       // Add pickup_type, drop_off_type, and note_id from static stop time info
@@ -1235,8 +1290,7 @@ function createScheduledDeparture(
           : false;
       })(),
       source: "scheduled",
-      // Include wheelchair accessibility information from static trip data
-      wheelchair_accessible: tripInfo.wheelchair_accessible || null,
+
       // Add pickup_type, drop_off_type, and note_id from stop time info
       pickupType: stopTimeInfo.pickupType || null,
       dropOffType: stopTimeInfo.dropOffType || null,

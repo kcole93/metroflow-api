@@ -12,6 +12,8 @@ export interface Station {
   system?: string;
   borough?: string;
   wheelchair_boarding?: number; // 0=No info, 1=Some accessible boarding, 2=Not possible
+  accessibilityStatus?: string | null; // ADA status of the station
+  accessibilityNotes?: string | null; // ADA direction notes of the station
 }
 
 export type Direction = "N" | "S" | "Inbound" | "Outbound" | "Unknown";
@@ -30,6 +32,8 @@ export interface StaticStopTimeInfo {
   borough: string | null;
   northLabel: string | null; // The label for the north direction (e.g., "Northbound")
   southLabel: string | null; // The label for the south direction (e.g., "Southbound")
+  adaStatus: number | null;
+  adaNotes: string | null;
 }
 
 /**
@@ -126,6 +130,8 @@ export interface StaticStopInfo {
   wheelchairBoarding?: number | null; // 0=No information, 1=Some accessible boarding, 2=Not possible
   northLabel: string | null; // Human-readable label for northbound directions, Subway only
   southLabel: string | null; // Human-readable label for southbound directions, Subway only
+  adaStatus?: number | null; // ADA status of the station
+  adaNotes?: string | null; // ADA direction notes of the station
 }
 
 // Helper function to create a case-insensitive Set
@@ -186,6 +192,8 @@ export interface StaticTripInfo {
   start_time?: string;
   wheelchair_accessible?: number | null; // 0 = no info, 1 = at least one wheelchair accommodation, 2 = no accommodations
   system: SystemType;
+  adaStatus: number | null;
+  adaNotes: string | null;
 }
 
 /**
@@ -198,6 +206,12 @@ export interface Note {
   noteTitle: string; // Title/heading for the note
   noteDesc: string; // Full description text
 }
+
+export type AccessibilityStatus =
+  | "Fully Accessible"
+  | "Partially Accessible"
+  | "Not Accessible"
+  | "No Information";
 
 export interface StaticData {
   /** Enriched map where key is stop_id, value contains full stop info including related routes and feed URLs. */

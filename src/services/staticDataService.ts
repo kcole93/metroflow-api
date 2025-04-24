@@ -48,6 +48,8 @@ interface StationCsvRow {
   Borough: string;
   "North Direction Label": string;
   "South Direction Label": string;
+  ADA: string;
+  "ADA Notes": string;
 }
 
 function addRouteToMap(
@@ -111,6 +113,8 @@ function addTripToMap(
     wheelchair_accessible: wheelchairAccessible,
     system: system,
     destinationStopId: destStopId,
+    adaStatus: t.ada?.trim() || null,
+    adaNotes: t.ada_notes?.trim() || null,
   });
 }
 
@@ -124,6 +128,8 @@ function processStop(
       borough: string | null;
       northLabel: string | null;
       southLabel: string | null;
+      adaStatus: number | null;
+      adaNotes: string | null;
     }
   >,
 ) {
@@ -175,22 +181,25 @@ function processStop(
 
   // Get North/South Labels from the pre-processed station details map
   const stationDetails = stationDetailsMap.get(originalStopId); // Lookup by original GTFS Stop ID
-  const northLabel = stationDetails?.northLabel || null;
-  const southLabel = stationDetails?.southLabel || null;
-  const finalBorough = stationDetails?.borough || borough; // Set borough for Subway stops from CSV
 
-  // Log wheelchair accessibility info for LIRR stations
-  if (system === "LIRR" && wheelchairBoardingNum !== null) {
-    const accessibilityStatus =
-      wheelchairBoardingNum === 0
-        ? "No information"
-        : wheelchairBoardingNum === 1
-          ? "Accessible"
-          : "Not accessible";
+  logger.debug(
+    `[Station Details] Stop: ${originalStopId}, Details: ${JSON.stringify(stationDetails)}`,
+  );
+  let northLabel: string | null = null;
+  let southLabel: string | null = null;
+  let adaStatus: number | null = null; // Default to null
+  let adaNotes: string | null = null;
 
-    logger.debug(
-      `[LIRR Accessibility] Station ${stopName} (${originalStopId}): ${accessibilityStatus}`,
-    );
+  // --- CONDITIONAL Lookup & Assignment for SUBWAY ---
+  if (system === "SUBWAY") {
+    const stationDetails = stationDetailsMap.get(originalStopId); // Use originalStopId key
+    if (stationDetails) {
+      // Only overwrite/set these fields if details were found for this Subway stop
+      northLabel = stationDetails.northLabel ?? null;
+      southLabel = stationDetails.southLabel ?? null;
+      adaStatus = stationDetails.adaStatus ?? null;
+      adaNotes = stationDetails.adaNotes ?? null;
+    }
   }
 
   // Check the passed 'map' before setting
@@ -213,6 +222,8 @@ function processStop(
       wheelchairBoarding: wheelchairBoardingNum,
       northLabel: northLabel,
       southLabel: southLabel,
+      adaStatus: adaStatus,
+      adaNotes: adaNotes,
     });
   }
 }
@@ -282,10 +293,32 @@ export async function loadStaticData(): Promise<void> {
       for (const row of stationCsvRaw) {
         const stopId = row["GTFS Stop ID"]?.trim(); // Match exact header name
         if (stopId) {
+          let parsedAdaStatus: number | null = null;
+          const adaValue = row["ADA"]?.trim();
+          if (adaValue !== undefined && adaValue !== null && adaValue !== "") {
+            const parsedInt = parseInt(adaValue, 10);
+
+            if (!isNaN(parsedInt)) {
+              logger.debug(
+                `Parsed ADA status for stop ${stopId}: ${parsedInt}`,
+              );
+              parsedAdaStatus = parsedInt;
+            } else {
+              logger.warn(
+                `Invalid ADA status value for stop ${stopId}: ${adaValue}. Setting status to null.`,
+              );
+              parsedAdaStatus = null;
+            }
+          } else {
+            parsedAdaStatus = null;
+          }
+
           stationDetailsMap.set(stopId, {
             borough: row.Borough?.trim() || null,
             northLabel: row["North Direction Label"]?.trim() || null,
             southLabel: row["South Direction Label"]?.trim() || null,
+            adaStatus: parsedAdaStatus,
+            adaNotes: row["ADA Notes"]?.trim() || null,
           });
           count++;
         }
@@ -459,6 +492,8 @@ export async function loadStaticData(): Promise<void> {
         borough: st.borough?.trim() || null,
         northLabel: st.north_label?.trim() || null,
         southLabel: st.south_label?.trim() || null,
+        adaStatus: st.ada_status?.trim() || null,
+        adaNotes: st.ada_notes?.trim() || null,
       };
 
       // Add the primary entry with the original tripId

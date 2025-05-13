@@ -160,7 +160,7 @@ export async function getStations(
       );
     }
   } catch (err) {
-    logger.error("[Departures] Static data not available:", err);
+    logger.error("[Departures] Static data not available:", { error: err });
     return [];
   }
 
@@ -1187,7 +1187,7 @@ function createRealtimeDeparture(
 
     return departure;
   } catch (error) {
-    logger.error(`Error creating realtime departure: ${error}`);
+    logger.error("Error creating realtime departure:", { error });
     return null;
   }
 }
@@ -1300,7 +1300,7 @@ function createScheduledDeparture(
 
     return departure;
   } catch (error) {
-    logger.error(`Error creating scheduled departure: ${error}`);
+    logger.error("Error creating scheduled departure:", { error });
     return null;
   }
 }
@@ -1655,7 +1655,7 @@ async function processStaticScheduleData(
         } catch (parseError) {
           logger.error(
             `[Static Fallback] Error parsing time ${scheduledTimeStr}:`,
-            parseError,
+            { error: parseError, time: scheduledTimeStr }
           );
           continue;
         }
@@ -1702,7 +1702,7 @@ async function processStaticScheduleData(
   } catch (fallbackError) {
     logger.error(
       `[Departures] Error during static fallback for ${systemName}:`,
-      fallbackError,
+      { error: fallbackError },
     );
     return [];
   }
@@ -1899,7 +1899,7 @@ export async function getDeparturesForStation(
 
     return combinedDepartures;
   } catch (err) {
-    logger.error("[Departures] Error processing departures:", err);
+    logger.error("[Departures] Error processing departures:", { error: err });
     return [];
   }
 }

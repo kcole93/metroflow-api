@@ -11,7 +11,32 @@ router.use("/api/v1", mtaRoutes);
 
 // Health check endpoint
 router.get("/api/health", (req, res) => {
-  res.status(200).json({ status: "OK", timestamp: new Date().toISOString() });
+  // Get cache statistics if available
+  let cacheStats = {};
+  try {
+    const cacheService = require('../services/cacheService');
+    if (typeof cacheService.getCacheStats === 'function') {
+      cacheStats = cacheService.getCacheStats();
+    }
+  } catch (e) {
+    // Ignore cache stats errors
+  }
+
+  // Basic health information
+  const healthData = {
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
+    memoryUsage: {
+      rss: Math.round(process.memoryUsage().rss / 1024 / 1024) + 'MB',
+      heapTotal: Math.round(process.memoryUsage().heapTotal / 1024 / 1024) + 'MB',
+      heapUsed: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB'
+    },
+    cache: cacheStats
+  };
+  
+  res.status(200).json(healthData);
 });
 
 // Analytics Endpoints ---

@@ -18,8 +18,54 @@ dotenv.config();
 
 // --- Environment Variables ---
 const port = process.env.PORT || 3000;
-const REFRESH_SCHEDULE = process.env.REFRESH_SCHEDULE || "0 0 * * *"; // Default: Every day at midnight
-const REFRESH_TIMEZONE = process.env.REFRESH_TIMEZONE || "America/New_York"; // Default: America/New_York
+const REFRESH_SCHEDULE = process.env.STATIC_REFRESH_SCHEDULE || "0 0 * * *"; // Default: Every day at midnight
+const REFRESH_TIMEZONE = process.env.STATIC_REFRESH_TIMEZONE || "America/New_York"; // Default: America/New_York
+
+// Define type for environment variable validation
+interface EnvVar {
+  name: string;
+  value: string | undefined;
+  required: boolean;
+}
+
+// Validate environment variables
+function validateEnvVars() {
+  const requiredVars: EnvVar[] = [
+    // Core API keys and endpoints
+    { name: 'MTA_API_BASE', value: process.env.MTA_API_BASE, required: true },
+    
+    // GTFS static files
+    { name: 'GTFS_STATIC_URL_NYCT', value: process.env.GTFS_STATIC_URL_NYCT, required: true },
+    { name: 'GTFS_STATIC_URL_LIRR', value: process.env.GTFS_STATIC_URL_LIRR, required: true },
+    { name: 'GTFS_STATIC_URL_MNR', value: process.env.GTFS_STATIC_URL_MNR, required: true },
+    
+    // Protobuf paths - these should exist in the codebase
+    { name: 'PROTO_BASE_PATH', value: process.env.PROTO_BASE_PATH, required: true },
+    { name: 'PROTO_NYCT_PATH', value: process.env.PROTO_NYCT_PATH, required: true },
+    { name: 'PROTO_MTARR_PATH', value: process.env.PROTO_MTARR_PATH, required: true }
+  ];
+
+  const missingVars = requiredVars.filter(v => v.required && !v.value);
+  
+  if (missingVars.length > 0) {
+    logger.error(`Missing required environment variables: ${missingVars.map(v => v.name).join(', ')}`);
+    process.exit(1);
+  }
+  
+  // Validate schedule format
+  try {
+    const isValid = cron.validate(REFRESH_SCHEDULE);
+    if (!isValid) {
+      logger.error(`Invalid cron schedule format: ${REFRESH_SCHEDULE}`);
+      process.exit(1);
+    }
+  } catch (e) {
+    logger.error(`Error validating cron schedule: ${REFRESH_SCHEDULE}`, { error: e });
+    process.exit(1);
+  }
+  
+  logger.info("Environment variables validated successfully");
+}
 
 const app: Express = express();
 let server: http.Server | null = null; // Variable to hold the server instance
@@ -49,6 +95,28 @@ app.use(express.json());
 app.use("/", limiter);
 app.use(trackApiUsage);
 
+// --- Security Headers ---
+app.use((req, res, next) => {
+  // Remove X-Powered-By header
+  res.removeHeader('X-Powered-By');
+  
+  // Prevent MIME type sniffing
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  
+  // Enable XSS protection in browsers
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  
+  // Prevent clickjacking
+  res.setHeader('X-Frame-Options', 'DENY');
+  
+  // Enable strict HTTPS
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  }
+  
+  next();
+});
+
 // --- Use Routes ---
 app.use("/", routes);
 
@@ -59,41 +127,69 @@ app.get("/", (req: Request, res: Response) => {
 
 // --- Global Error Handler ---
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  // Ensure analyticsService DB is closed even on unhandled errors, if possible
-  // Note: This might run *after* the uncaughtException handler in AnalyticsService
-  analyticsService.close();
-  logger.error("Unhandled error:", { error: err }); // Pass error object
+  // Log detailed error information but don't close analytics DB in the middleware
+  // (That should be handled by the graceful shutdown process)
+  logger.error("Unhandled API error:", { 
+    error: err,
+    message: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+    ip: req.ip,
+    headers: req.headers['user-agent']
+  });
+  
   // Avoid sending stack trace in production
-  res.status(500).json({ error: "Something went wrong on the server." });
+  const isProd = process.env.NODE_ENV === 'production';
+  if (isProd) {
+    res.status(500).json({ error: "Something went wrong on the server." });
+  } else {
+    // In development, include more details
+    res.status(500).json({ 
+      error: "Something went wrong on the server.", 
+      message: err.message,
+      stack: err.stack
+    });
+  }
 });
 
 // --- Graceful Shutdown Logic ---
-const gracefulShutdown = (signal: string) => {
+const gracefulShutdown = (signal: string): void => {
+  // Avoid multiple shutdown calls
+  if (isShuttingDown) {
+    logger.info(`Shutdown already in progress, ignoring ${signal}`);
+    return;
+  }
+  
+  isShuttingDown = true;
   logger.warn(`Received ${signal}. Starting graceful shutdown...`);
 
   // 1. Stop accepting new connections
   if (server) {
+    // Set a hard shutdown timeout
+    const forcedExitTimer = setTimeout(() => {
+      logger.error("Graceful shutdown timed out after 15 seconds. Forcing exit.");
+      analyticsService.close(); // Attempt close again just in case
+      process.exit(1);
+    }, 15000); // 15 seconds timeout
+    
     server.close((err) => {
       if (err) {
         logger.error("Error closing HTTP server:", { error: err });
       } else {
-        logger.info("HTTP server closed.");
+        logger.info("HTTP server closed successfully.");
       }
 
       // 2. Close the Analytics database connection
       analyticsService.close(); // This is now safe as no new requests should arrive
+      
+      // 3. Clear the forced exit timer
+      clearTimeout(forcedExitTimer);
 
-      // 3. Exit process (allow time for logs to flush, etc.)
-      logger.info("Shutdown complete. Exiting.");
+      // 4. Exit process (allow time for logs to flush, etc.)
+      logger.info("Shutdown complete. Exiting with code 0.");
       process.exit(0);
     });
-
-    // Optional: Force shutdown after a timeout if server.close() hangs
-    setTimeout(() => {
-      logger.error("Graceful shutdown timed out. Forcing exit.");
-      analyticsService.close(); // Attempt close again just in case
-      process.exit(1);
-    }, 10000); // 10 seconds timeout
   } else {
     // If server wasn't started, just close DB and exit
     logger.warn("Server not started, only closing analytics DB.");
@@ -103,9 +199,13 @@ const gracefulShutdown = (signal: string) => {
 };
 
 // --- Server Startup ---
-async function startServer() {
+async function startServer(): Promise<void> {
   try {
     logger.info("Initializing server...");
+    
+    // Validate environment variables first
+    validateEnvVars();
+    
     await Promise.all([
       loadProtobufDefinitions(),
       loadBoroughData(),
@@ -117,7 +217,7 @@ async function startServer() {
       // Assign the server instance
       logger.info(
         // Use logger.info instead of console.info
-        `⚡️ Server is running at http://localhost:${port}`,
+        `⚡️ Server is running at http://localhost:${port} in ${process.env.NODE_ENV || 'development'} mode`,
       );
 
       // --- Attach Shutdown Handlers AFTER Server Starts ---
@@ -173,16 +273,29 @@ async function startServer() {
   }
 }
 
+// Flag to track if shutdown is in progress
+let isShuttingDown: boolean = false;
+
 // --- Uncaught Exception / Unhandled Rejection ---
 // These act as a last resort safety net
-process.on("uncaughtException", (err, origin) => {
-  logger.error("UNCAUGHT EXCEPTION:", { error: err, origin });
+process.on("uncaughtException", (err: Error, origin: string) => {
+  logger.error("UNCAUGHT EXCEPTION:", { 
+    error: err, 
+    message: err.message,
+    stack: err.stack,
+    origin 
+  });
   // Attempt graceful shutdown, might fail if state is corrupted
   gracefulShutdown("uncaughtException");
 });
 
-process.on("unhandledRejection", (reason, promise) => {
-  logger.error("UNHANDLED REJECTION:", { reason });
+process.on("unhandledRejection", (reason: unknown, promise: Promise<any>) => {
+  // Handle both Error objects and other types of reasons
+  const reasonObj = reason instanceof Error ? 
+    { message: reason.message, stack: reason.stack } : 
+    { reason };
+    
+  logger.error("UNHANDLED REJECTION:", reasonObj);
   // Attempt graceful shutdown
   gracefulShutdown("unhandledRejection");
 });

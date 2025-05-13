@@ -1,28 +1,57 @@
 // src/routes/index.ts
-import { Router } from "express";
+import { Router, Response, Request, RequestHandler } from "express";
 import { logger } from "../utils/logger";
 import { analyticsService } from "../services/analyticsService";
 import mtaRoutes from "./mtaRoutes";
+import { getCacheStats } from "../services/cacheService";
 
 const router = Router();
 
 // Prefix all MTA routes with /api/v1
 router.use("/api/v1", mtaRoutes);
 
-// Health check endpoint
-router.get("/api/health", (req, res) => {
-  // Get cache statistics if available
+// Basic health check endpoint - publicly accessible
+const basicHealthCheckHandler: RequestHandler = (_req, res) => {
+  // Only provide minimal health status for public endpoint
+  res.status(200).json({
+    status: "OK",
+    timestamp: new Date().toISOString()
+  });
+};
+
+// Detailed health check endpoint - protected with API key
+const detailedHealthCheckHandler: RequestHandler = (req, res) => {
+  // Verify API key
+  const apiKey = req.headers['x-api-key'] || req.query.api_key;
+  const configuredApiKey = process.env.HEALTH_CHECK_API_KEY;
+  
+  // If no API key is configured, only allow on localhost
+  if (!configuredApiKey) {
+    const clientIp = req.ip || '';
+    const isLocalhost = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
+    
+    if (!isLocalhost) {
+      logger.warn(`Unauthorized access attempt to detailed health check from IP: ${clientIp}`);
+      res.status(403).json({ error: "Forbidden: detailed health check only available from localhost when no API key is configured" });
+      return;
+    }
+  } else if (apiKey !== configuredApiKey) {
+    logger.warn(`Invalid API key used for detailed health check: ${apiKey}`);
+    res.status(403).json({ error: "Forbidden: invalid API key" });
+    return;
+  }
+  
+  // Get cache statistics
   let cacheStats = {};
   try {
-    const cacheService = require('../services/cacheService');
-    if (typeof cacheService.getCacheStats === 'function') {
-      cacheStats = cacheService.getCacheStats();
+    if (typeof getCacheStats === 'function') {
+      cacheStats = getCacheStats();
     }
   } catch (e) {
-    // Ignore cache stats errors
+    logger.debug("Error getting cache stats for health check", { error: e });
   }
 
-  // Basic health information
+  // Detailed health information
   const healthData = {
     status: "OK",
     timestamp: new Date().toISOString(),
@@ -37,11 +66,16 @@ router.get("/api/health", (req, res) => {
   };
   
   res.status(200).json(healthData);
-});
+  return;
+};
+
+// Register health check routes
+router.get("/api/health", basicHealthCheckHandler);
+router.get("/api/health/detailed", detailedHealthCheckHandler);
 
 // Analytics Endpoints ---
 // --- Station Analytics Endpoint ---
-router.get("/api/analytics/stations", (req, res) => {
+const stationAnalyticsHandler: RequestHandler = (_req, res) => {
   // Renamed for clarity
   logger.debug("[API Route] GET /analytics/stations request received");
   try {
@@ -56,10 +90,10 @@ router.get("/api/analytics/stations", (req, res) => {
       .status(500)
       .json({ message: "Error retrieving station analytics data" });
   }
-});
+};
 
 // --- API Usage Analytics Endpoint ---
-router.get("/api/analytics/usage", (req, res) => {
+const apiUsageAnalyticsHandler: RequestHandler = (_req, res) => {
   logger.debug("[API Route] GET /analytics/usage request received");
   try {
     const usageData = analyticsService.getApiUsageData(); // Gets API usage data
@@ -70,5 +104,10 @@ router.get("/api/analytics/usage", (req, res) => {
     });
     res.status(500).json({ message: "Error retrieving API usage data" });
   }
-});
+};
+
+// Register analytics routes
+router.get("/api/analytics/stations", stationAnalyticsHandler);
+router.get("/api/analytics/usage", apiUsageAnalyticsHandler);
+
 export default router;

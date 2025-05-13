@@ -42,7 +42,10 @@ function validateEnvVars() {
     // Protobuf paths - these should exist in the codebase
     { name: 'PROTO_BASE_PATH', value: process.env.PROTO_BASE_PATH, required: true },
     { name: 'PROTO_NYCT_PATH', value: process.env.PROTO_NYCT_PATH, required: true },
-    { name: 'PROTO_MTARR_PATH', value: process.env.PROTO_MTARR_PATH, required: true }
+    { name: 'PROTO_MTARR_PATH', value: process.env.PROTO_MTARR_PATH, required: true },
+    
+    // Security-related variables (optional)
+    { name: 'HEALTH_CHECK_API_KEY', value: process.env.HEALTH_CHECK_API_KEY, required: false }
   ];
 
   const missingVars = requiredVars.filter(v => v.required && !v.value);

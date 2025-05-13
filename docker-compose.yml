@@ -21,6 +21,7 @@ services:
       - GTFS_STATIC_URL_MNR=${GTFS_STATIC_URL_MNR}
       - STATIC_REFRESH_SCHEDULE=${STATIC_REFRESH_SCHEDULE}
       - STATIC_REFRESH_TIMEZONE=${STATIC_REFRESH_TIMEZONE}
+      - HEALTH_CHECK_API_KEY=${HEALTH_CHECK_API_KEY:-""}
       - TZ=America/New_York
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]

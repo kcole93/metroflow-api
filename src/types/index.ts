@@ -93,6 +93,12 @@ export interface Departure {
   noteText?: string | null; // The actual note text associated with the noteId
 }
 
+// Type definition for time periods in service alerts
+export type ActivePeriod = {
+  start?: Date;
+  end?: Date;
+};
+
 export interface ServiceAlert {
   id: string; // From the alert feed entity id
   agency_id: string;
@@ -102,8 +108,9 @@ export interface ServiceAlert {
   affectedStations: string[]; // Station IDs directly affected (e.g., ["LIRR-349"])
   affectedLinesLabels?: string[]; // Human-readable route names (e.g., ["6 Train", "Babylon Branch"])
   affectedStationsLabels?: string[]; // Human-readable station names (e.g., ["Penn Station"])
-  startDate?: Date; // Date object or null
-  endDate?: Date; // Date object or null
+  activePeriods?: ActivePeriod[]; // Array of all active time periods
+  startDate?: Date; // Date object or null (most relevant active period start)
+  endDate?: Date; // Date object or null (most relevant active period end)
   url?: string;
 }
 

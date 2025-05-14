@@ -1,4 +1,4 @@
-import { ServiceAlert } from "../types";
+import { ServiceAlert, ActivePeriod } from "../types";
 import { logger } from "../utils/logger";
 import { fetchAndParseFeed } from "../utils/gtfsFeedParser";
 import { getStaticData } from "./staticDataService";
@@ -50,6 +50,7 @@ interface IntermediateServiceAlert extends Omit<ServiceAlert, "description"> {
   rawHtmlDescription?: string | null;
   affectedLinesLabels?: string[]; // Human-readable labels for affected lines
   affectedStationsLabels?: string[]; // Human-readable labels for affected stations
+  activePeriods: ActivePeriod[]; // Array of all active time periods from the feed
 }
 
 // --- getServiceAlerts Function ---
@@ -226,8 +227,41 @@ export async function getServiceAlerts(
         }
 
         const url = getText(alert.url);
-        const startDateEpoch = alert.active_period?.[0]?.start;
-        const endDateEpoch = alert.active_period?.[0]?.end;
+        
+        // Process all active periods
+        const activePeriods = alert.active_period?.map((period: {start?: number, end?: number}) => ({
+          start: period.start ? new Date(Number(period.start) * 1000) : undefined,
+          end: period.end ? new Date(Number(period.end) * 1000) : undefined
+        })) || [];
+        
+        // Find the most relevant period (currently active or next upcoming)
+        const now = Date.now();
+        let relevantPeriod = activePeriods[0]; // Default to first period if none match criteria
+        
+        // First try to find a currently active period
+        const activePeriod = activePeriods.find((period: ActivePeriod) => {
+          const start = period.start?.getTime();
+          const end = period.end?.getTime();
+          return (!start || start <= now) && (!end || end >= now);
+        });
+        
+        // If found an active period, use it; otherwise find the soonest upcoming period
+        if (activePeriod) {
+          relevantPeriod = activePeriod;
+        } else {
+          // Find the period that will start soonest in the future
+          const upcomingPeriods = activePeriods
+            .filter((period: ActivePeriod) => period.start && period.start.getTime() > now)
+            .sort((a: ActivePeriod, b: ActivePeriod) => (a.start!.getTime() - b.start!.getTime()));
+          
+          if (upcomingPeriods.length > 0) {
+            relevantPeriod = upcomingPeriods[0];
+          }
+        }
+        
+        // Set startDate/endDate from the relevant period
+        const startDate = relevantPeriod?.start;
+        const endDate = relevantPeriod?.end;
 
         // Create the intermediate alert object
         const affectedLinesArray = Array.from(affectedSystemRouteIds).sort();
@@ -269,12 +303,9 @@ export async function getServiceAlerts(
           affectedStations: affectedStationsArray,
           affectedLinesLabels,
           affectedStationsLabels,
-          startDate: startDateEpoch
-            ? new Date(Number(startDateEpoch) * 1000)
-            : undefined,
-          endDate: endDateEpoch
-            ? new Date(Number(endDateEpoch) * 1000)
-            : undefined,
+          activePeriods,
+          startDate: startDate,
+          endDate: endDate,
           url: url,
         };
         
@@ -307,13 +338,16 @@ export async function getServiceAlerts(
   if (filterActiveNow) {
     const now = Date.now();
     filteredIntermediateAlerts = filteredIntermediateAlerts.filter((alert) => {
-      const start = alert.startDate?.getTime();
-      const end = alert.endDate?.getTime();
-      // Include if: No start date OR start date is in the past/now
-      const started = !start || start <= now;
-      // Include if: No end date OR end date is in the future/now
-      const notEnded = !end || end >= now;
-      return started && notEnded;
+      // Check if ANY active period is currently active
+      return alert.activePeriods.some((period: ActivePeriod) => {
+        const start = period.start?.getTime();
+        const end = period.end?.getTime();
+        // Include if: No start date OR start date is in the past/now
+        const started = !start || start <= now;
+        // Include if: No end date OR end date is in the future/now
+        const notEnded = !end || end >= now;
+        return started && notEnded;
+      });
     });
     logger.info(
       `[Alerts Service] Filtered to ${filteredIntermediateAlerts.length} active alerts.`,
@@ -437,6 +471,7 @@ export async function getServiceAlerts(
       return {
         ...rest, // Spread the rest of the properties (id, title, affectedLines, etc.)
         description: finalDescription, // Use the final (potentially converted) description
+        activePeriods: alert.activePeriods, // Include all active periods in the result
       };
     },
   );

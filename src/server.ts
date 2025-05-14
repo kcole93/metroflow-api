@@ -29,6 +29,18 @@ interface EnvVar {
 }
 
 // Validate environment variables
+/**
+ * Validates required environment variables and configuration settings.
+ * 
+ * This function checks that all necessary environment variables are defined
+ * and have valid values for the application to function properly. It:
+ * 1. Verifies core API keys and endpoints
+ * 2. Confirms paths to GTFS static files for each transit system
+ * 3. Validates other configuration parameters like cache settings
+ * 
+ * If any required variables are missing or invalid, it logs appropriate
+ * warnings to help with troubleshooting.
+ */
 function validateEnvVars() {
   const requiredVars: EnvVar[] = [
     // Core API keys and endpoints
@@ -202,6 +214,22 @@ const gracefulShutdown = (signal: string): void => {
 };
 
 // --- Server Startup ---
+/**
+ * Initializes and starts the API server with all required subsystems.
+ * 
+ * This function orchestrates the complete server startup sequence:
+ * 1. Validates environment variables and configuration
+ * 2. Loads essential data (protobuf definitions, geographic data)
+ * 3. Sets up scheduled tasks for data refresh
+ * 4. Initializes middleware and routes
+ * 5. Starts the HTTP server on the configured port
+ * 6. Registers shutdown handlers for graceful termination
+ * 
+ * The function handles errors during startup and provides detailed
+ * logging of the initialization process.
+ * 
+ * @returns Promise that resolves when server is successfully started
+ */
 async function startServer(): Promise<void> {
   try {
     logger.info("Initializing server...");

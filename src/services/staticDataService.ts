@@ -52,6 +52,16 @@ interface StationCsvRow {
   "ADA Notes": string;
 }
 
+/**
+ * Adds a route from GTFS data to the route map with proper system prefixing.
+ * 
+ * This function processes a raw route object from GTFS data, normalizes its
+ * fields, and adds it to the provided map with a system-prefixed unique key.
+ * 
+ * @param r - Raw route object from GTFS data
+ * @param system - The transit system this route belongs to
+ * @param map - Reference to the map where routes should be stored
+ */
 function addRouteToMap(
   r: any,
   system: SystemType,
@@ -73,6 +83,20 @@ function addRouteToMap(
   });
 }
 
+/**
+ * Adds a trip from GTFS data to the trip map with necessary processing.
+ * 
+ * This function handles trip data by:
+ * 1. Normalizing trip_id and route_id fields
+ * 2. Converting direction_id to numeric format
+ * 3. Setting destination information from headsign or destination map
+ * 4. Handling peak/off-peak designation
+ * 
+ * @param t - Raw trip object from GTFS data
+ * @param system - The transit system this trip belongs to
+ * @param map - Reference to the map where trips should be stored
+ * @param destinations - Map of trip_id to destination stop_id for proper linking
+ */
 function addTripToMap(
   t: any,
   system: SystemType,
@@ -118,6 +142,22 @@ function addTripToMap(
   });
 }
 
+/**
+ * Processes a stop from GTFS data with enhanced metadata.
+ * 
+ * This function handles the complex processing of transit stops:
+ * 1. Normalizes stop IDs and coordinates
+ * 2. Determines borough location based on geographic coordinates
+ * 3. Identifies terminal stations based on name or other criteria
+ * 4. Applies direction labels (north/south) from station details
+ * 5. Adds accessibility information
+ * 6. Establishes parent-child relationships for stations and platforms
+ * 
+ * @param rawStop - Raw stop object from GTFS data
+ * @param system - The transit system this stop belongs to
+ * @param map - Reference to the map where processed stops should be stored
+ * @param stationDetailsMap - Map containing enriched station details from supplementary data
+ */
 function processStop(
   rawStop: any,
   system: SystemType,
@@ -229,6 +269,21 @@ function processStop(
 }
 
 // Helper function to determine if a station is a terminal station based on name and system
+/**
+ * Determines if a stop is a terminal/major station based on criteria.
+ * 
+ * This function identifies important transit hubs and terminals by analyzing:
+ * 1. Station name patterns typical of major stations
+ * 2. System-specific terminal ID patterns
+ * 3. Known major stations like Grand Central, Penn Station, etc.
+ * 
+ * Terminal stations may receive special handling in UI or routing applications.
+ * 
+ * @param system - The transit system the stop belongs to
+ * @param stopName - The name of the stop/station
+ * @param stopId - The ID of the stop/station
+ * @returns Boolean indicating if the station is considered a terminal/major station
+ */
 function determineIfTerminal(
   system: SystemType,
   stopName: string,
@@ -668,6 +723,15 @@ export async function loadStaticData(): Promise<void> {
 }
 
 // getStaticData function
+/**
+ * Retrieves the currently loaded static data.
+ * 
+ * This function provides safe access to the application's static GTFS data,
+ * performing necessary initialization if the data hasn't been loaded yet.
+ * 
+ * @returns The current static data instance with all processed GTFS information
+ * @throws Error if static data cannot be loaded
+ */
 export function getStaticData(): StaticData {
   if (!staticData) {
     // Consider attempting loadStaticData here again or throwing a more specific error

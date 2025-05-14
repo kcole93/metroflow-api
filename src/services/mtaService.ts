@@ -19,7 +19,6 @@ import {
   AccessibilityStatus,
 } from "../types";
 import * as dotenv from "dotenv";
-import { get } from "node:http";
 
 dotenv.config();
 
@@ -93,7 +92,70 @@ export const ROUTE_ID_TO_FEED_MAP: { [key: string]: string } = {
   "MNR-6": MNR_FEED,
 };
 
+/**
+ * Fixes a platform direction issue for M trains in Williamsburg/Bushwick.
+ * The MTA GTFS-RT feed has a known bug where M train platform directions
+ * are inverted for certain stations.
+ *
+ * @param tripId The trip ID or route identifier for logging
+ * @param stopId The stop ID to fix if needed
+ * @returns The corrected stop ID
+ */
+/**
+ * Fixes platform direction issues for M trains in Williamsburg/Bushwick.
+ * 
+ * The MTA GTFS-RT feed has a known bug where M train platform directions
+ * are inverted for certain stations. This function corrects the issue by
+ * swapping N/S suffixes for the affected stations.
+ * 
+ * @param tripId - The trip ID or route identifier for logging purposes
+ * @param stopId - The stop ID to fix if needed (e.g., "M13N")
+ * @returns The corrected stop ID or the original if no fix was needed
+ */
+function fixMTrainPlatformsInBushwick(tripId: string, stopId: string): string {
+  // List of stations with inverted platform directions
+  const buggyStations = new Set([
+    "M11", // Myrtle Av
+    "M12", // Central Av
+    "M13", // Knickerbocker Av
+    "M14", // Myrtle-Wyckoff Avs
+    "M16", // Seneca Av
+    "M18", // Forest Av
+  ]);
+
+  // Skip if the stop ID doesn't match our pattern or isn't in our list
+  if (stopId.length !== 4 || !buggyStations.has(stopId.substring(0, 3))) {
+    return stopId;
+  }
+
+  // Invert N/S direction
+  const stationBase = stopId.substring(0, 3);
+  const direction = stopId.charAt(3);
+  let newDirection = "N";
+
+  if (direction === "N") {
+    newDirection = "S";
+  }
+
+  const newStopId = stationBase + newDirection;
+  logger.debug(
+    `[M Train Fix] Corrected platform for ${tripId}: ${stopId} → ${newStopId}`,
+  );
+
+  return newStopId;
+}
+
 // --- Helper function to determine per-station accessibility
+/**
+ * Determines accessibility status and notes for a transit station.
+ * 
+ * This function evaluates a station's accessibility based on ADA status
+ * and wheelchair boarding information. It provides both a standardized
+ * status classification and any additional notes regarding accessibility.
+ * 
+ * @param stopInfo - The static stop information for the station
+ * @returns Object containing accessibilityStatus (enum) and accessibilityNotes (string or null)
+ */
 function getStationAccessibilityInfo(stopInfo: StaticStopInfo): {
   accessibilityStatus: AccessibilityStatus;
   accessibilityNotes: string | null;
@@ -143,6 +205,20 @@ function getStationAccessibilityInfo(stopInfo: StaticStopInfo): {
 }
 
 // --- getStations Function ---
+/**
+ * Retrieves stations matching the specified search criteria.
+ * 
+ * This function searches through the static station data to find stations
+ * that match the provided query string and/or system filter. It performs
+ * case-insensitive partial matching on station names and provides detailed
+ * information about matching stations including coordinates, lines served,
+ * and accessibility information.
+ * 
+ * @param query - Optional search term to find stations by name
+ * @param systemFilter - Optional system filter (SUBWAY, LIRR, MNR) to limit results
+ * @returns Promise resolving to an array of matching Station objects
+ * @throws Error if static data is not available
+ */
 export async function getStations(
   query?: string,
   systemFilter?: StaticStopInfo["system"],
@@ -305,6 +381,26 @@ function findStaticTripInfo(
 }
 
 // --- Helper to determine trip direction ---
+/**
+ * Determines the human-readable direction of a trip based on multiple data sources.
+ * 
+ * This function uses a multi-step approach to determine the most accurate direction label:
+ * - For MNR: Prioritizes static data (direction_id) with fallbacks to stop sequence analysis
+ * - For Subway: Uses platform orientation (N/S) to lookup direction labels, with special handling for M trains
+ * - For LIRR: Primarily uses static direction_id when available
+ * 
+ * The function accounts for complexities like parent/child station relationships and
+ * corrects for known data issues in the GTFS feed.
+ * 
+ * @param systemName - The transit system (SUBWAY, LIRR, MNR)
+ * @param staticTripInfo - Optional static trip information if available
+ * @param rtTrip - The realtime trip object from the GTFS-RT feed
+ * @param tripIdFromFeed - The trip ID string from the feed
+ * @param stopTimeUpdates - Array of stop time updates for this trip
+ * @param currentStopId - The stop ID where this trip is being observed
+ * @param staticData - Reference to loaded static GTFS data
+ * @returns The determined direction as a Direction type (N, S, Inbound, Outbound, or Unknown)
+ */
 function determineTripDirection(
   systemName: SystemType,
   staticTripInfo: StaticTripInfo | null,
@@ -314,6 +410,11 @@ function determineTripDirection(
   currentStopId: string,
   staticData: StaticData,
 ): Direction {
+  // Apply M train fix to correct inverted platform directions for M trains
+  if (systemName === "SUBWAY" && rtTrip?.route_id === "M") {
+    currentStopId = fixMTrainPlatformsInBushwick(tripIdFromFeed, currentStopId);
+  }
+
   let tripDirection: Direction = "Unknown";
 
   // Special case for MNR - prioritize static data for accuracy, but have fallbacks
@@ -536,13 +637,54 @@ function determineTripDirection(
 }
 
 // --- Helper to find the destination for a trip ---
+/**
+ * Determines the final destination name and borough for a transit trip.
+ * 
+ * This function employs a multi-step process with system-specific logic:
+ * - For MNR: Prioritizes static trip_headsign, falls back to destination stop ID
+ * - For Subway: Prioritizes realtime last stop based on array order, with parent station lookup
+ * - For LIRR: Uses stop sequence to find the last stop
+ * 
+ * The function includes fallback mechanisms to handle cases where primary data sources are unavailable,
+ * and special handling for the M line which has known platform direction issues.
+ * 
+ * @param systemName - The transit system (SUBWAY, LIRR, MNR)
+ * @param staticTripInfo - Optional static trip information if available
+ * @param rtTrip - The realtime trip object from the GTFS-RT feed
+ * @param stopTimeUpdates - Array of stop time updates for this trip
+ * @param staticData - Reference to loaded static GTFS data
+ * @returns Object containing the finalDestination string and destinationBorough (nullable)
+ */
 function determineDestination(
   systemName: SystemType,
-  staticTripInfo: StaticTripInfo | null,
+  staticTripInfo: StaticTripInfo | null, 
   rtTrip: any,
   stopTimeUpdates: any[],
   staticData: StaticData,
 ): { finalDestination: string; destinationBorough: string | null } {
+  // Apply M train fix to correct platform issues for stop IDs in stop time updates
+  if (systemName === "SUBWAY" && rtTrip?.route_id === "M" && stopTimeUpdates) {
+    // Get the trip ID for logging
+    const tripId = rtTrip?.trip_id || "unknown";
+
+    // Fix each stop time update's stop ID
+    for (let i = 0; i < stopTimeUpdates.length; i++) {
+      if (stopTimeUpdates[i]?.stop_id) {
+        const originalStopId = stopTimeUpdates[i].stop_id;
+        stopTimeUpdates[i].stop_id = fixMTrainPlatformsInBushwick(
+          tripId,
+          originalStopId,
+        );
+
+        // Only log if we actually made a change
+        if (stopTimeUpdates[i].stop_id !== originalStopId) {
+          logger.debug(
+            `[M Train Fix][Destination] Corrected platform in stopTimeUpdates: ${originalStopId} → ${stopTimeUpdates[i].stop_id}`,
+          );
+        }
+      }
+    }
+  }
   let finalDestination = "Unknown Destination";
   let destinationBorough: string | null = null;
   let destSource = "Unknown"; // For debugging purposes
@@ -1306,6 +1448,25 @@ function createScheduledDeparture(
 }
 
 // --- Process realtime feed entities ---
+/**
+ * Processes GTFS-RT feed entities to extract departure information.
+ * 
+ * This function transforms raw GTFS-RT data into structured departure objects by:
+ * 1. Filtering relevant trip updates that affect the requested station
+ * 2. Matching realtime data with static schedule information when available
+ * 3. Determining trip directions and destinations
+ * 4. Calculating delays based on scheduled vs. realtime timestamps
+ * 5. Handling system-specific extensions (NYCT, MTARR)
+ * 
+ * @param decodedEntities - Array of decoded GTFS-RT feed entities
+ * @param systemName - The transit system the feed belongs to
+ * @param staticData - Reference to loaded static GTFS data
+ * @param originalChildStopIds - Set of stop IDs relevant to the requested station
+ * @param processedRealtimeTripIds - Set to track processed trip IDs (for deduplication)
+ * @param now - Current timestamp in milliseconds
+ * @param cutoffTime - Maximum future timestamp in milliseconds to include departures
+ * @returns Array of Departure objects derived from realtime data
+ */
 async function processRealtimeFeedEntities(
   decodedEntities: any[],
   systemName: SystemType,
@@ -1513,6 +1674,27 @@ async function processRealtimeFeedEntities(
 }
 
 // --- Process static schedule data for a station ---
+/**
+ * Processes static schedule data to supplement realtime departures.
+ * 
+ * This function generates departure information from static GTFS schedule data
+ * for cases where realtime updates are unavailable. It:
+ * 1. Filters for trips scheduled for today based on service_id
+ * 2. Excludes trips already covered by realtime data
+ * 3. Calculates scheduled departure times for the requested station
+ * 4. Creates departure objects with "scheduled" source designation
+ * 
+ * Static departures serve as a fallback when realtime data is missing or incomplete.
+ * 
+ * @param systemName - The transit system to process
+ * @param originalChildStopIds - Set of stop IDs relevant to the requested station
+ * @param staticData - Reference to loaded static GTFS data
+ * @param processedRealtimeTripIds - Set of trip IDs already handled by realtime data
+ * @param now - Current timestamp in milliseconds
+ * @param cutoffTime - Maximum future timestamp in milliseconds to include departures
+ * @param todayStr - Today's date in YYYYMMDD format for service calendar lookup
+ * @returns Array of Departure objects derived from static schedule
+ */
 async function processStaticScheduleData(
   systemName: SystemType,
   originalChildStopIds: Set<string>,
@@ -1655,7 +1837,7 @@ async function processStaticScheduleData(
         } catch (parseError) {
           logger.error(
             `[Static Fallback] Error parsing time ${scheduledTimeStr}:`,
-            { error: parseError, time: scheduledTimeStr }
+            { error: parseError, time: scheduledTimeStr },
           );
           continue;
         }
@@ -1708,11 +1890,25 @@ async function processStaticScheduleData(
   }
 }
 
-// --- Main Function: Get Departures For Station ---
+/**
+ * Retrieves upcoming departures for a specified station across all transit systems (subway, rail).
+ * 
+ * This is the main entry point for departure data retrieval. The function:
+ * 1. Validates the station ID and retrieves station information
+ * 2. Determines which realtime feeds to fetch based on routes serving the station
+ * 3. Processes both realtime and scheduled data to create a comprehensive departure list
+ * 4. Applies requested filters and sorts departures by time
+ * 
+ * @param requestedUniqueStationId - The unique station ID in format "SYSTEM-STOPID" (e.g., "SUBWAY-L11" or "LIRR-237")
+ * @param limitMinutes - Optional time limit in minutes; only returns departures within this window
+ * @param sourceFilter - Optional filter to show only realtime or only scheduled departures
+ * @returns Promise resolving to an array of Departure objects sorted by departure time
+ * @throws Error if static data is not available or station cannot be found
+ */
 export async function getDeparturesForStation(
-  requestedUniqueStationId: string, // e.g., "SUBWAY-L11" or "LIRR-237"
+  requestedUniqueStationId: string, 
   limitMinutes?: number,
-  sourceFilter?: DepartureSource, // Optional filter for realtime or scheduled departures
+  sourceFilter?: DepartureSource,
 ): Promise<Departure[]> {
   // --- 1. Initialize and load static data ---
   let staticData: StaticData;
@@ -1724,7 +1920,26 @@ export async function getDeparturesForStation(
   }
 
   // --- 2. Get station info and validate ---
-  const requestedStationInfo = staticData.stops.get(requestedUniqueStationId);
+  // Apply M train fix if this is an M train stop in Williamsburg/Bushwick
+  let finalStationId = requestedUniqueStationId;
+  if (
+    requestedUniqueStationId.startsWith("SUBWAY-M1") &&
+    requestedUniqueStationId.length >= 11
+  ) {
+    // Extract the stop ID part (e.g., "M13N" from "SUBWAY-M13N")
+    const stopIdPart = requestedUniqueStationId.substring(7);
+    // Apply the fix to get the corrected stop ID
+    const fixedStopId = fixMTrainPlatformsInBushwick("stationId", stopIdPart);
+    // Only update if there was a change
+    if (fixedStopId !== stopIdPart) {
+      finalStationId = `SUBWAY-${fixedStopId}`;
+      logger.info(
+        `[M Train Fix][Station] Corrected station ID: ${requestedUniqueStationId} → ${finalStationId}`,
+      );
+    }
+  }
+
+  const requestedStationInfo = staticData.stops.get(finalStationId);
   const stationName = requestedStationInfo?.name || "(Unknown)";
 
   analyticsService.trackStationLookup(

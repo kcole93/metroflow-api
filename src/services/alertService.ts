@@ -54,11 +54,31 @@ interface IntermediateServiceAlert extends Omit<ServiceAlert, "description"> {
 }
 
 // --- getServiceAlerts Function ---
+/**
+ * Retrieves and filters service alerts from the MTA alert feed.
+ * 
+ * This function fetches alerts from the MTA's unified alert feed and processes them 
+ * through several steps:
+ * 1. Decodes raw GTFS-RT Service Alerts data
+ * 2. Normalizes alerts with consistent format and deduplicates them
+ * 3. Extracts affected lines and stations
+ * 4. Applies optional filters for active alerts, specific lines, or stations
+ * 5. Converts HTML descriptions to more readable Markdown format
+ * 
+ * The function handles multi-period alerts by determining the most relevant
+ * active period or upcoming period.
+ * 
+ * @param targetLines - Optional array of line IDs to filter alerts by (e.g., ["SUBWAY-1", "LIRR-1"])
+ * @param filterActiveNow - When true, only returns alerts currently active based on time periods
+ * @param stationId - Optional station ID to filter alerts affecting a specific station
+ * @param includeLabels - When true, includes human-readable labels for affected lines and stations
+ * @returns Promise resolving to an array of filtered and processed ServiceAlert objects
+ */
 export async function getServiceAlerts(
-  targetLines?: string[], // Expects ["SUBWAY-1", "LIRR-1"], etc.
+  targetLines?: string[],
   filterActiveNow = false,
-  stationId?: string, // Optional station ID to filter alerts affecting a specific station
-  includeLabels = false, // Whether to include human-readable labels for lines and stations
+  stationId?: string,
+  includeLabels = false,
 ): Promise<ServiceAlert[]> {
   const feedUrl = ALERT_FEEDS.ALL;
   const feedName = "all_service_alerts";

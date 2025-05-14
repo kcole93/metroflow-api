@@ -40,6 +40,20 @@ interface RawCalendarDateEntry {
 }
 
 // --- Calculate Active Services for a Specific Date ---
+/**
+ * Calculates the set of active service_ids for a specific date.
+ * 
+ * This function determines which transit services are operational on a given date by:
+ * 1. Finding services that are active on the weekday (from calendar.txt)
+ * 2. Adding one-time additions for the date (from calendar_dates.txt)
+ * 3. Removing one-time exceptions for the date (from calendar_dates.txt)
+ * 
+ * The resulting set of service_ids can be used to filter trips that are
+ * scheduled to run on the specified date.
+ * 
+ * @param targetDate - The date to calculate active services for
+ * @returns Promise resolving to a Set of active service_ids
+ */
 async function calculateActiveServices(targetDate: Date): Promise<Set<string>> {
   const calculationDateStr = format(targetDate, "yyyy-MM-dd");
   logger.info(`Calculating active services for ${calculationDateStr}...`);
@@ -164,6 +178,20 @@ async function calculateActiveServices(targetDate: Date): Promise<Set<string>> {
 
 // --- Public Function to Get Active Services for Today ---
 // Handles caching based on date and avoids recalculation if not needed.
+/**
+ * Retrieves the set of active service_ids for the current date.
+ * 
+ * This function provides a cached view of active services, with intelligent
+ * reloading logic to ensure data remains current:
+ * - Performs calculation only once per day under normal conditions
+ * - Reloads if previous attempt resulted in an error
+ * - Thread-safe for concurrent access
+ * 
+ * The returned service_ids are crucial for correctly filtering transit
+ * schedules to show only services running today.
+ * 
+ * @returns Promise resolving to a Set of active service_ids for today
+ */
 export async function getActiveServicesForToday(): Promise<Set<string>> {
   const today = startOfDay(new Date()); // Use start of day for comparison consistency
 
@@ -190,6 +218,20 @@ export async function getActiveServicesForToday(): Promise<Set<string>> {
 
 // --- Force Refresh Function ---
 // Useful if you want to trigger a reload manually (e.g., after midnight)
+/**
+ * Forces a refresh of the active services data.
+ * 
+ * This function invalidates the cached active services data and
+ * triggers an immediate recalculation. It's useful for:
+ * - Manual refreshes via admin controls
+ * - Scheduled refresh operations
+ * - Recovery after detected data inconsistencies
+ * 
+ * The function resets the cache state and error flags before
+ * initiating a fresh calculation of today's active services.
+ * 
+ * @returns Promise that resolves when refresh is complete
+ */
 export async function refreshActiveServices(): Promise<void> {
   logger.info("Forcing refresh of active services for today...");
   lastLoadedDate = null; // Invalidate cache date

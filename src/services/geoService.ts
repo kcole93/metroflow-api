@@ -27,6 +27,18 @@ let isDataLoaded = false;
 let isLoadingError = false;
 
 // --- Initialization Function ---
+/**
+ * Loads NYC borough boundary data from GeoJSON file.
+ * 
+ * This function reads and parses the borough boundary polygons that are used
+ * for geocoding transit stops and determining which borough a coordinate falls within.
+ * The function implements safety mechanisms:
+ * - Only loads once per application lifecycle
+ * - Avoids retrying after failed attempts
+ * - Reports detailed logging of the loading process
+ * 
+ * @returns Promise that resolves when loading is complete
+ */
 export async function loadBoroughData(): Promise<void> {
   if (isDataLoaded || isLoadingError) {
     // Avoid reloading if already loaded or if loading previously failed
@@ -77,6 +89,22 @@ export async function loadBoroughData(): Promise<void> {
 }
 
 // --- Lookup Function ---
+/**
+ * Determines which NYC borough a set of coordinates falls within.
+ * 
+ * This function uses point-in-polygon calculations with the loaded borough
+ * boundary data to determine which borough (if any) contains the specified
+ * coordinates. It's used to enrich transit data with borough information.
+ * 
+ * The function includes robust input validation and graceful fallback if:
+ * - Boundary data failed to load
+ * - Invalid coordinates are provided
+ * - Coordinates don't fall within any known borough
+ * 
+ * @param latitude - Decimal latitude coordinate
+ * @param longitude - Decimal longitude coordinate
+ * @returns Borough name as string, or null if undetermined/invalid
+ */
 export function getBoroughForCoordinates(
   latitude?: number,
   longitude?: number,
@@ -115,7 +143,15 @@ export function getBoroughForCoordinates(
   return null;
 }
 
-//Function to check if data is ready
+/**
+ * Checks if borough boundary data has been successfully loaded.
+ * 
+ * This utility function allows other parts of the application to
+ * verify that the geographic data is available before attempting
+ * operations that depend on it, enabling graceful degradation.
+ * 
+ * @returns Boolean indicating if geo data is loaded and ready to use
+ */
 export function isGeoDataReady(): boolean {
   return isDataLoaded;
 }

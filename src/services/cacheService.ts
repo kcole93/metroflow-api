@@ -14,31 +14,46 @@ interface SystemTtls {
 }
 
 // Get TTL from environment variable or use default by system
-const defaultTtl = parseInt(process.env.CACHE_TTL_SECONDS || "60", 10);
+const DEFAULT_TTL = parseInt(process.env.CACHE_TTL_SECONDS || "60", 10);
 
 // Create system-specific TTLs to optimize for different data refresh rates
 const systemTtls: SystemTtls = {
-  SUBWAY: parseInt(process.env.CACHE_TTL_SUBWAY || String(defaultTtl), 10), // Subway data refreshes quickly
-  LIRR: parseInt(process.env.CACHE_TTL_LIRR || String(defaultTtl * 2), 10), // LIRR data changes less frequently
-  MNR: parseInt(process.env.CACHE_TTL_MNR || String(defaultTtl * 2), 10),   // MNR data changes less frequently
+  SUBWAY: parseInt(process.env.CACHE_TTL_SUBWAY || String(DEFAULT_TTL), 10), // Subway data refreshes quickly
+  LIRR: parseInt(process.env.CACHE_TTL_LIRR || String(DEFAULT_TTL * 2), 10), // LIRR data changes less frequently
+  MNR: parseInt(process.env.CACHE_TTL_MNR || String(DEFAULT_TTL * 2), 10),   // MNR data changes less frequently
   ALERTS: parseInt(process.env.CACHE_TTL_ALERTS || "300", 10),              // Alerts can be cached longer
-  DEFAULT: defaultTtl
+  DEFAULT: DEFAULT_TTL
 };
 
 // Create cache with default TTL
 const cache = new NodeCache({
-  stdTTL: defaultTtl,
-  checkperiod: Math.max(Math.floor(defaultTtl * 0.2), 10), // At least check every 10 seconds
+  stdTTL: DEFAULT_TTL,
+  checkperiod: Math.max(Math.floor(DEFAULT_TTL * 0.2), 10), // At least check every 10 seconds
   useClones: false, // Better performance by not cloning objects
   deleteOnExpire: true, // Clean up expired items
   maxKeys: parseInt(process.env.CACHE_MAX_KEYS || "1000", 10) // Prevent memory leaks
 });
 
 // Log cache configuration at startup
-logger.info(`Cache initialized with default TTL: ${defaultTtl} seconds`);
+logger.info(`Cache initialized with default TTL: ${DEFAULT_TTL} seconds`);
 logger.info(`System-specific TTLs: ${JSON.stringify(systemTtls)}`);
 
 // Helper to determine TTL based on cache key pattern
+/**
+ * Determines the appropriate time-to-live (TTL) for a cache item based on its key.
+ * 
+ * This function implements an intelligent TTL selection strategy:
+ * 1. Honors explicitly provided TTL values when available
+ * 2. Uses system-specific TTLs based on key pattern matching
+ * 3. Falls back to a default TTL when no specific match is found
+ * 
+ * Different transit systems have different data refresh patterns, which is why
+ * they get assigned different TTL values.
+ * 
+ * @param key - The cache key to determine TTL for
+ * @param explicitTtl - Optional explicit TTL override in seconds
+ * @returns The determined TTL value in seconds
+ */
 function determineTtl(key: string, explicitTtl?: number): number {
   if (explicitTtl && explicitTtl > 0) {
     return explicitTtl; // Always honor explicit TTL if provided
@@ -50,10 +65,21 @@ function determineTtl(key: string, explicitTtl?: number): number {
   if (key.includes('_MNR_')) return systemTtls.MNR;
   if (key.includes('_alerts') || key.includes('_service_alerts')) return systemTtls.ALERTS;
   
-  return systemTtls.DEFAULT;
+  return DEFAULT_TTL; // Fall back to default
 }
 
 // Get value from cache with logging
+/**
+ * Retrieves a value from the cache by its key.
+ * 
+ * This function provides type-safe access to cached values and includes
+ * diagnostic logging of cache hits/misses in non-production environments.
+ * Logging is suppressed in production to reduce overhead and log noise.
+ * 
+ * @template T - The expected type of the cached value
+ * @param key - The cache key to retrieve
+ * @returns The cached value typed as T, or undefined if not found
+ */
 export function getCache<T>(key: string): T | undefined {
   const value = cache.get<T>(key);
   
@@ -96,6 +122,14 @@ export function setCache<T>(
 }
 
 // Clear specific cache key
+/**
+ * Removes a specific item from the cache by its key.
+ * 
+ * This function safely removes a cached item if it exists, with
+ * appropriate logging. It's a no-op if the key doesn't exist in the cache.
+ * 
+ * @param key - The cache key to remove
+ */
 export function clearCacheKey(key: string): void {
   if (cache.has(key)) {
     cache.del(key);
@@ -104,6 +138,15 @@ export function clearCacheKey(key: string): void {
 }
 
 // Clear all keys matching a pattern
+/**
+ * Removes multiple cache items matching a pattern.
+ * 
+ * This function is useful for invalidating groups of related cached items,
+ * such as all items related to a particular transit system or data type.
+ * It uses simple substring matching to identify keys to clear.
+ * 
+ * @param pattern - The pattern to match against cache keys
+ */
 export function clearCachePattern(pattern: string): void {
   const keys = cache.keys().filter(key => key.includes(pattern));
   if (keys.length > 0) {
@@ -113,6 +156,13 @@ export function clearCachePattern(pattern: string): void {
 }
 
 // Flush entire cache
+/**
+ * Completely clears all items from the cache.
+ * 
+ * This function performs a full cache flush, removing all cached items
+ * regardless of their keys or TTL values. It's typically used during
+ * system initialization or when a major data refresh occurs.
+ */
 export function flushCache(): void {
   const keyCount = cache.keys().length;
   cache.flushAll();
@@ -128,6 +178,15 @@ interface CacheStats {
 }
 
 // Get cache statistics for monitoring
+/**
+ * Retrieves current cache statistics for monitoring.
+ * 
+ * This function provides diagnostic information about the cache's
+ * current state, including hit/miss counters and memory usage metrics.
+ * It's useful for performance monitoring and debugging.
+ * 
+ * @returns A CacheStats object containing various cache performance metrics
+ */
 export function getCacheStats(): CacheStats {
   return {
     keys: cache.keys().length,

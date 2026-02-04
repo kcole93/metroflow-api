@@ -27,7 +27,7 @@ const MTA_API_BASE =
   process.env.MTA_API_BASE ||
   "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds";
 
-export const SUBWAY_FEEDS = {
+const SUBWAY_FEEDS = {
   ACE: `${MTA_API_BASE}/nyct%2Fgtfs-ace`,
   BDFM: `${MTA_API_BASE}/nyct%2Fgtfs-bdfm`,
   G: `${MTA_API_BASE}/nyct%2Fgtfs-g`,
@@ -37,8 +37,8 @@ export const SUBWAY_FEEDS = {
   NUMERIC: `${MTA_API_BASE}/nyct%2Fgtfs`, // 1-6, S
   SI: `${MTA_API_BASE}/nyct%2Fgtfs-si`,
 };
-export const LIRR_FEED = `${MTA_API_BASE}/lirr%2Fgtfs-lirr`;
-export const MNR_FEED = `${MTA_API_BASE}/mnr%2Fgtfs-mnr`;
+const LIRR_FEED = `${MTA_API_BASE}/lirr%2Fgtfs-lirr`;
+const MNR_FEED = `${MTA_API_BASE}/mnr%2Fgtfs-mnr`;
 
 // --- Route ID to Feed URL Map ---
 export const ROUTE_ID_TO_FEED_MAP: { [key: string]: string } = {

@@ -106,12 +106,5 @@ const logger = winston.createLogger({
   exitOnError: false, // Do not exit on handled exceptions
 });
 
-// Stream interface for morgan (optional, if you use express logging middleware)
-// logger.stream = {
-//   write: (message) => {
-//     logger.http(message.trim());
-//   },
-// };
-
 export type Logger = winston.Logger;
 export { logger };

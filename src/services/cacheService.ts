@@ -140,11 +140,12 @@ export function clearCacheKey(key: string): void {
 // Clear all keys matching a pattern
 /**
  * Removes multiple cache items matching a pattern.
- * 
+ *
  * This function is useful for invalidating groups of related cached items,
  * such as all items related to a particular transit system or data type.
  * It uses simple substring matching to identify keys to clear.
- * 
+ *
+ * @internal
  * @param pattern - The pattern to match against cache keys
  */
 export function clearCachePattern(pattern: string): void {
@@ -158,10 +159,12 @@ export function clearCachePattern(pattern: string): void {
 // Flush entire cache
 /**
  * Completely clears all items from the cache.
- * 
+ *
  * This function performs a full cache flush, removing all cached items
  * regardless of their keys or TTL values. It's typically used during
  * system initialization or when a major data refresh occurs.
+ *
+ * @internal
  */
 export function flushCache(): void {
   const keyCount = cache.keys().length;

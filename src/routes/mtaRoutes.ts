@@ -122,7 +122,6 @@ const getDeparturesHandler: RequestHandler = async (req, res) => {
     );
   }
 };
-router.get("/departures/:stationId", getDeparturesHandler);
 // GET /api/v1/departures/:stationId (e.g., /departures/LIRR-3 for Penn LIRR)
 router.get("/departures/:stationId", getDeparturesHandler);
 

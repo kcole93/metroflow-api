@@ -36,33 +36,6 @@ export interface StaticStopTimeInfo {
   adaNotes: string | null;
 }
 
-/**
- * Helper function to convert our internal system type to GTFS format
- * @param system The system type to convert
- * @returns The GTFS-compatible system type (lowercase)
- */
-export function toGtfsSystemType(system: SystemType): string {
-  switch (system) {
-    case "SUBWAY":
-      return "subway";
-    case "UNKNOWN":
-      return "unknown";
-    default:
-      return system.toLowerCase();
-  }
-}
-
-/**
- * Helper function to normalize system type casing for GTFS compatibility
- * @param system The system type to normalize
- * @returns The normalized system type
- */
-export function normalizeSystemType(system: SystemType): SystemType {
-  if (system === "SUBWAY") return "SUBWAY";
-  if (system === "UNKNOWN") return "UNKNOWN";
-  return system;
-}
-
 export type DepartureSource = "realtime" | "scheduled";
 
 export interface Departure {
@@ -139,29 +112,6 @@ export interface StaticStopInfo {
   southLabel: string | null; // Human-readable label for southbound directions, Subway only
   adaStatus?: number | null; // ADA status of the station
   adaNotes?: string | null; // ADA direction notes of the station
-}
-
-// Helper function to create a case-insensitive Set
-export function createCaseInsensitiveSet(): Set<
-  string & { __caseInsensitive__: true }
-> {
-  return new Set<string>() as Set<string & { __caseInsensitive__: true }>;
-}
-
-// Helper function to add to case-insensitive Set
-export function addToCaseInsensitiveSet(
-  set: Set<string & { __caseInsensitive__: true }>,
-  value: string,
-): void {
-  set.add(value.toLowerCase() as string & { __caseInsensitive__: true });
-}
-
-// Helper function to check case-insensitive Set
-export function hasInCaseInsensitiveSet(
-  set: Set<string & { __caseInsensitive__: true }>,
-  value: string,
-): boolean {
-  return set.has(value.toLowerCase() as string & { __caseInsensitive__: true });
 }
 
 /**

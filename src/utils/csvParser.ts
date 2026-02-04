@@ -1,58 +1,110 @@
-import fs from "node:fs/promises";
+import fs from "node:fs";
 import path from "node:path";
-import Papa, { ParseResult, ParseError } from "papaparse"; // Import types from papaparse
-// Import the Logger type you defined/exported
+import Papa from "papaparse";
 import { Logger } from "./logger";
 
+/**
+ * Parses a CSV file using streaming to minimize memory usage.
+ * Processes rows in chunks instead of loading the entire file into memory.
+ */
 export async function parseCsvFile<T extends object>(
   filePath: string,
   logger: Logger,
 ): Promise<T[]> {
-  try {
+  return new Promise((resolve, reject) => {
     logger.info(`Reading CSV file: ${path.basename(filePath)}`);
-    const fileContent: string = await fs.readFile(filePath, "utf8");
 
-    // Explicitly type the result from Papa.parse
-    const result: ParseResult<T> = Papa.parse<T>(fileContent, {
+    const results: T[] = [];
+    let errorCount = 0;
+
+    const fileStream = fs.createReadStream(filePath, { encoding: "utf8" });
+
+    fileStream.on("error", (error) => {
+      logger.error(
+        `Error reading CSV ${path.basename(filePath)}: ${error.message}`,
+        { error },
+      );
+      reject(error);
+    });
+
+    Papa.parse<T>(fileStream, {
       header: true,
       skipEmptyLines: true,
       dynamicTyping: false,
+      step: (row) => {
+        if (row.errors.length > 0) {
+          errorCount++;
+          if (errorCount <= 5) {
+            logger.warn(`Parse error in ${path.basename(filePath)}:`, { errors: row.errors });
+          }
+        }
+        if (row.data) {
+          results.push(row.data);
+        }
+      },
+      complete: () => {
+        if (errorCount > 5) {
+          logger.warn(`${errorCount} total parsing errors in ${path.basename(filePath)}`);
+        }
+        logger.debug(`Successfully parsed ${results.length} rows from ${path.basename(filePath)}`);
+        resolve(results);
+      },
+      error: (error) => {
+        logger.error(`Error parsing CSV ${path.basename(filePath)}: ${error.message}`, { error });
+        reject(error);
+      },
+    });
+  });
+}
+
+/**
+ * Processes a CSV file row by row using a callback, without storing all rows in memory.
+ * Use this for very large files like stop_times.txt where you only need to extract specific data.
+ */
+export async function processCsvFileStreaming<T extends object>(
+  filePath: string,
+  logger: Logger,
+  onRow: (row: T) => void,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    logger.info(`Streaming CSV file: ${path.basename(filePath)}`);
+
+    let rowCount = 0;
+    let errorCount = 0;
+
+    const fileStream = fs.createReadStream(filePath, { encoding: "utf8" });
+
+    fileStream.on("error", (error) => {
+      logger.error(
+        `Error reading CSV ${path.basename(filePath)}: ${error.message}`,
+        { error },
+      );
+      reject(error);
     });
 
-    // Check for parsing errors
-    if (result.errors.length > 0) {
-      // Log only a few errors to avoid flooding logs
-      const errorsToLog = result.errors.slice(0, 5);
-      logger.warn(
-        `Encountered ${result.errors.length} parsing error(s) in ${path.basename(
-          filePath,
-        )}. First ${errorsToLog.length} errors:`,
-        { errors: errorsToLog }, // Pass errors as structured metadata
-      );
-    }
-
-    // Log successful parsing info
-    logger.debug(
-      `Successfully parsed ${result.data.length} rows from ${path.basename(
-        filePath,
-      )}. Meta:`,
-      result.meta,
-    );
-
-    return result.data;
-  } catch (error: unknown) {
-    if (error instanceof Error) {
-      logger.error(
-        `Error reading/parsing CSV ${path.basename(filePath)}: ${error.message}`,
-        { error }, // Pass the full error object as metadata
-      );
-    } else {
-      logger.error(
-        `Unknown error reading/parsing CSV ${path.basename(filePath)}`,
-        { error: String(error) }, // Log the string representation
-      );
-    }
-    // Rethrow the error to signal failure to the caller
-    throw error;
-  }
+    Papa.parse<T>(fileStream, {
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: false,
+      step: (row) => {
+        if (row.errors.length > 0) {
+          errorCount++;
+        } else if (row.data) {
+          rowCount++;
+          onRow(row.data);
+        }
+      },
+      complete: () => {
+        if (errorCount > 0) {
+          logger.warn(`${errorCount} parsing errors in ${path.basename(filePath)}`);
+        }
+        logger.debug(`Streamed ${rowCount} rows from ${path.basename(filePath)}`);
+        resolve(rowCount);
+      },
+      error: (error) => {
+        logger.error(`Error parsing CSV ${path.basename(filePath)}: ${error.message}`, { error });
+        reject(error);
+      },
+    });
+  });
 }

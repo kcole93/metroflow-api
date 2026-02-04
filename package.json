@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "setup": "ts-node ./scripts/setup-protos.ts",
     "build": "rimraf ./dist && tsc -p tsconfig.json",
     "start": "LOG_LEVEL=info node dist/server.js",
     "dev": "LOG_LEVEL=debug nodemon src/server.ts",

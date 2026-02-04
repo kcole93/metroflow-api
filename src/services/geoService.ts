@@ -145,11 +145,12 @@ export function getBoroughForCoordinates(
 
 /**
  * Checks if borough boundary data has been successfully loaded.
- * 
+ *
  * This utility function allows other parts of the application to
  * verify that the geographic data is available before attempting
  * operations that depend on it, enabling graceful degradation.
- * 
+ *
+ * @internal
  * @returns Boolean indicating if geo data is loaded and ready to use
  */
 export function isGeoDataReady(): boolean {

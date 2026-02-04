@@ -14,6 +14,7 @@ import {
 import * as dotenv from "dotenv";
 import { getBoroughForCoordinates } from "./geoService";
 import { ROUTE_ID_TO_FEED_MAP } from "../services/mtaService";
+import { isTerminalStation } from "../config/systemConfig";
 
 dotenv.config();
 
@@ -175,7 +176,7 @@ function processStop(
   );
 
   const stopName = rawStop.stop_name || "";
-  const isTerminal = determineIfTerminal(system, stopName, originalStopId);
+  const isTerminal = isTerminalStation(system, stopName, originalStopId);
 
   let northLabel: string | null = null;
   let southLabel: string | null = null;
@@ -214,34 +215,7 @@ function processStop(
   });
 }
 
-/**
- * Determines if a station is a terminal/major station.
- */
-function determineIfTerminal(
-  system: SystemType,
-  stopName: string,
-  stopId: string,
-): boolean {
-  if (system === "MNR") {
-    return (
-      stopName.includes("Grand Central") ||
-      stopName.includes("Stamford") ||
-      stopName.includes("New Haven") ||
-      stopId === "1"
-    );
-  } else if (system === "LIRR") {
-    return (
-      stopName.includes("Penn Station") ||
-      stopName.includes("Atlantic Terminal") ||
-      stopName.includes("Jamaica") ||
-      stopName.includes("Hicksville") ||
-      stopId === "349" ||
-      stopId === "237" ||
-      stopId === "52"
-    );
-  }
-  return false;
-}
+// Terminal station detection now uses isTerminalStation from systemConfig
 
 /**
  * Processes stop_times for a single system using streaming.

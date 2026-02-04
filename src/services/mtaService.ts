@@ -18,6 +18,11 @@ import {
   StaticTripInfo,
   AccessibilityStatus,
 } from "../types";
+import {
+  getSystemConfig,
+  isCommuterRail,
+  getRealtimeExtensionKey,
+} from "../config/systemConfig";
 import * as dotenv from "dotenv";
 
 dotenv.config();
@@ -184,10 +189,10 @@ function getStationAccessibilityInfo(stopInfo: StaticStopInfo): {
         // Keep default "No Information" for null/undefined/other
         break;
     }
-  } else if (stopInfo.system === "LIRR" || stopInfo.system === "MNR") {
+  } else if (isCommuterRail(stopInfo.system)) {
     switch (stopInfo.wheelchairBoarding) {
       case 1:
-        // LIRR/MNR 1 maps to 'Accessible', no standard 'Partial' state here
+        // Commuter rail 1 maps to 'Accessible', no standard 'Partial' state here
         accessibilityStatus = "Fully Accessible";
         break;
       case 2:
@@ -248,7 +253,7 @@ export async function getStations(
       !lowerCaseQuery || stopInfo.name.toLowerCase().includes(lowerCaseQuery);
     if (!nameMatch) continue;
     let includeStop = false;
-    if (stopInfo.system === "LIRR" || stopInfo.system === "MNR")
+    if (isCommuterRail(stopInfo.system))
       includeStop = true;
     else if (stopInfo.system === "SUBWAY") {
       if (stopInfo.parentStationId == null || stopInfo.parentStationId === "")
@@ -316,10 +321,10 @@ function getSystemFromFeedUrl(feedUrl: string): SystemType | null {
   return null;
 }
 
-// --- Helper to get normalized trip ID for MNR/LIRR ---
+// --- Helper to get normalized trip ID for commuter rail ---
 function normalizeTripId(tripId: string, systemName: SystemType): string {
-  if (systemName === "MNR" || systemName === "LIRR") {
-    // Remove leading zeros for MNR/LIRR trip IDs
+  if (isCommuterRail(systemName)) {
+    // Remove leading zeros for commuter rail trip IDs
     return tripId.replace(/^0+/, "");
   }
   return tripId;
@@ -974,18 +979,18 @@ function checkIsTerminalArrival(
     );
   }
 
-  // For MNR and LIRR, we need additional checks to identify terminal arrivals
-  if (systemName === "MNR" || systemName === "LIRR") {
+  // For commuter rail, we need additional checks to identify terminal arrivals
+  if (isCommuterRail(systemName)) {
     // Get the unique stop key for this system and stop ID
     const stopKey = `${systemName}-${stuOriginalStopId}`;
     // Look up stop info to check if it's a terminal station
     const stopInfo = staticData.stops.get(stopKey);
-    const isTerminalStation = stopInfo?.isTerminal || false;
+    const isTerminal = stopInfo?.isTerminal || false;
 
     // If this is a known terminal station or the last stop of the trip
-    if (isTerminalStation || isLastStop) {
+    if (isTerminal || isLastStop) {
       logger.debug(
-        `[${systemName} Terminal] Identified terminal arrival at ${stuOriginalStopId} (${stopInfo?.name || "Unknown"}) for trip (isTerminalStation: ${isTerminalStation}, isLastStop: ${isLastStop})`,
+        `[${systemName} Terminal] Identified terminal arrival at ${stuOriginalStopId} (${stopInfo?.name || "Unknown"}) for trip (isTerminal: ${isTerminal}, isLastStop: ${isLastStop})`,
       );
       return true;
     }
@@ -1003,15 +1008,17 @@ function extractTrackInfo(
   systemName: SystemType,
   originalChildStopIds: Set<string>,
 ): string | undefined {
+  // Get the realtime extension key for this system
+  const extensionKey = getRealtimeExtensionKey(systemName);
+
   // Get extensions appropriate to the system type
-  const mtarrExtension =
-    systemName === "LIRR" || systemName === "MNR"
-      ? stu[".transit_realtime.mta_railroad_stop_time_update"]
-      : null;
+  const mtarrExtension = isCommuterRail(systemName)
+    ? stu[".transit_realtime.mta_railroad_stop_time_update"]
+    : null;
 
   const nyctExtension =
-    systemName === "SUBWAY"
-      ? stu[".transit_realtime.nyct_stop_time_update"]
+    systemName === "SUBWAY" && extensionKey
+      ? stu[extensionKey]
       : null;
 
   // Determine track from available sources
@@ -1272,7 +1279,7 @@ function createRealtimeDeparture(
       stu[".transit_realtime.mta_railroad_stop_time_update"];
 
     if (
-      (systemName === "MNR" || systemName === "LIRR") &&
+      isCommuterRail(systemName) &&
       mtarrExtension &&
       mtarrExtension.trainStatus
     ) {
@@ -1426,7 +1433,7 @@ function createScheduledDeparture(
         // Consider it a terminal if the station is marked as terminal or the direction suggests it
         // (direction_id = 1 typically means inbound to a major terminal for commuter rail)
         return stopInfo?.isTerminal ||
-          ((systemName === "MNR" || systemName === "LIRR") &&
+          (isCommuterRail(systemName) &&
             tripInfo.direction_id === 1)
           ? true
           : false;
@@ -1500,7 +1507,7 @@ async function processRealtimeFeedEntities(
       // Normalize trip ID for better matching
       tripIdFromFeed = normalizeTripId(tripIdFromFeed, systemName);
 
-      if (systemName === "MNR" || systemName === "LIRR") {
+      if (isCommuterRail(systemName)) {
         logger.debug(
           `[Trip ID] Normalized realtime ${systemName} trip ID: ${tripIdFromFeed}`,
         );
@@ -1567,7 +1574,7 @@ async function processRealtimeFeedEntities(
         if (departureTimeLong && Number(departureTimeLong) > 0) {
           relevantTime = Number(departureTimeLong) * 1000;
           // This is a normal departure
-        } else if (systemName === "MNR" || systemName === "LIRR") {
+        } else if (isCommuterRail(systemName)) {
           // For commuter rail, handle terminal station arrivals
           if (arrivalTimeLong && Number(arrivalTimeLong) > 0) {
             relevantTime = Number(arrivalTimeLong) * 1000;
@@ -1586,11 +1593,11 @@ async function processRealtimeFeedEntities(
 
             if (!isTerminalArrival || includeTerminalArrivals) {
               logger.debug(
-                `[MNR/LIRR] Using arrival time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed} (${isTerminalArrival ? "terminal arrival" : "non-terminal stop"})`,
+                `[Commuter Rail] Using arrival time for stop ${stuOriginalStopId} on trip ${tripIdFromFeed} (${isTerminalArrival ? "terminal arrival" : "non-terminal stop"})`,
               );
             } else {
               logger.debug(
-                `[MNR/LIRR] Skipping terminal arrival at ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
+                `[Commuter Rail] Skipping terminal arrival at ${stuOriginalStopId} on trip ${tripIdFromFeed}`,
               );
               continue; // Skip terminal arrivals if we don't want to include them
             }
